@@ -30,7 +30,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from . import machine, naming
 from .auth import Principal
@@ -214,7 +214,7 @@ DEFAULT_VENDOR_ORDER: tuple[str, ...] = ("shadeform", "runpod", "aws")
 
 
 def effective_vendors(vendors: list[str] | None, regions: list[str] | None,
-                      capacity_type: str | None) -> list[str]:
+                      capacity_type: str | None, pinned: bool = False) -> list[str]:
     """The vendor list a job actually goes out with (HYPERUN-DEFAULT-VENDORS).
 
     Args:
@@ -222,28 +222,34 @@ def effective_vendors(vendors: list[str] | None, regions: list[str] | None,
         regions: what the caller wrote. When non-empty the caller chose places,
             so no vendor is added.
         capacity_type: "spot" keeps the empty list, and with it AWS alone.
+        pinned: the job names its machine (HYPERUN-INSTANCE-PIN). That machine is
+            an AWS type, so the job goes out like a spot job: no vendors, which
+            PACSrun reads as AWS alone. Filling in Shadeform and RunPod would only
+            add two candidates that cannot sell it.
 
     Returns:
         The list to write into spec.placement.vendors; empty means "write none".
     """
     if vendors:
         return list(vendors)
-    if regions or capacity_type == "spot":
+    if regions or capacity_type == "spot" or pinned:
         return []
     return list(DEFAULT_VENDOR_ORDER)
 
 
 def effective_mode(vendors: list[str] | None, regions: list[str] | None,
-                   capacity_type: str | None, mode: str | None) -> str | None:
+                   capacity_type: str | None, mode: str | None,
+                   pinned: bool = False) -> str | None:
     """The placement mode a job goes out with (HYPERUN-DEFAULT-VENDORS).
 
     A caller's own mode always wins. When the vendors are FILLED -- no vendor, no
-    region, not spot -- the job compares all of them and buys the cheapest, so the
-    mode is "cheapest". Otherwise None, which PACSrun reads as "ordered".
+    region, not spot, no pinned machine -- the job compares all of them and buys
+    the cheapest, so the mode is "cheapest". Otherwise None, which PACSrun reads
+    as "ordered".
     """
     if mode:
         return mode
-    if not vendors and not regions and capacity_type != "spot":
+    if not vendors and not regions and capacity_type != "spot" and not pinned:
         return "cheapest"
     return None
 
@@ -267,6 +273,18 @@ class SubmitRequest(BaseModel):
     not say "run this on RunPod" or "price every vendor and buy nothing", both
     of which PACSrun's CRD has had all along.
     """
+
+    # ★ A FIELD THIS SERVER DOES NOT KNOW IS DROPPED, NOT REFUSED, AND THAT IS A
+    # DECISION (2026-10-13), NOT pydantic's default left in place. Clients and this
+    # server are upgraded separately: a CLI newer than the server sends fields the
+    # server has never heard of, and refusing them would break every older server
+    # for every newer client. The price is that a dropped field is silent -- on
+    # 2026-10-13 a body carrying `instance_type` passed the model of a server
+    # without that field with no error and the field was gone, so a job sent that
+    # way would have run wherever the solver chose. So a client that
+    # depends on a field reads GET /v1/schema first and stops if the field is not
+    # there; the CLI does that for `instance_type` (HYPERUN-INSTANCE-PIN).
+    model_config = ConfigDict(extra="ignore")
 
     name: str = Field(
         min_length=1,
@@ -307,6 +325,24 @@ class SubmitRequest(BaseModel):
     )
     cpus: str | None = Field(default=None, description='CPU request, e.g. "4".')
     memory: str | None = Field(default=None, description='Memory request, e.g. "16Gi".')
+    instance_type: str | None = Field(
+        default=None,
+        max_length=64,
+        # HYPERUN-INSTANCE-PIN. PACSrun's CRD has had spec.resources.instanceType
+        # all along and nothing here could write it until 2026-10-13. The pattern is
+        # the shape of every one of the 1,354 names in PACSrun's catalogue, and it
+        # refuses a stray space rather than trimming it: the name goes to PACSrun
+        # exactly as written, and " t3.xlarge" is not in its catalogue.
+        pattern=r"^[a-z0-9][a-z0-9-]*\.[a-z0-9-]+$",
+        description="The exact AWS machine to run on, e.g. \"t3.xlarge\". Leave it "
+        "out to let the solver choose, which is what almost every job wants: a "
+        "pinned job runs on this type or waits, and the solver considers nothing "
+        "else. AWS only, so vendors may name only `aws` and regions only AWS "
+        "regions. Not together with `gpu`: a GPU machine brings its own cards and "
+        "the job gets all of them. Refused when PACSrun could not place the type "
+        "(arm64, a Xen family, no CoreMark row) or when one pod does not fit on it; "
+        "/v1/validate says which.",
+    )
     capacity_type: str | None = Field(
         default=None,
         pattern="^(spot|on-demand)$",
@@ -426,6 +462,17 @@ class SubmitRequest(BaseModel):
             raise ValueError(
                 f"vendors lists {', '.join(duplicates)} more than once. "
                 f"A vendor appears at most once."
+            )
+
+        # HYPERUN-INSTANCE-PIN. PACSrun's CRD refuses both at once ("specify at most
+        # one of resources.instanceType or resources.gpus"), so this would fail at
+        # create anyway; saying it here says why. Whether PACSrun can place the type
+        # at all is /v1/validate's question, because the answer needs its tables.
+        if self.instance_type is not None and self.gpu is not None:
+            raise ValueError(
+                f"instance_type and gpu cannot be used together: {self.instance_type!r} "
+                f"already decides the GPU, and a pinned GPU machine is claimed whole. "
+                f"Leave gpu out, or leave instance_type out and ask by GPU."
             )
         return self
 
@@ -1205,6 +1252,11 @@ def to_hyperunjob(
             from . import catalogue
             gpus["name"] = catalogue.canonical(request.gpu.name)
         resources["gpus"] = gpus
+    if request.instance_type:
+        # HYPERUN-INSTANCE-PIN. Written exactly as asked: PACSrun looks the name up in
+        # its own catalogue (internal/pacs/filter.go:216) and the request model has
+        # already refused it together with `gpu`, which the CRD would refuse too.
+        resources["instanceType"] = request.instance_type
 
     spec: dict[str, Any] = {
         "image": request.image,
@@ -1281,11 +1333,13 @@ def to_hyperunjob(
     # HYPERUN-DEFAULT-VENDORS: an ask naming no vendor and no region goes out with
     # all three runnable vendors, Shadeform first, instead of reaching PACSrun as
     # "the default region" -- which is AWS alone.
-    sent_vendors = effective_vendors(request.vendors, request.regions, capacity_type)
+    pinned = bool(request.instance_type)
+    sent_vendors = effective_vendors(request.vendors, request.regions, capacity_type,
+                                     pinned)
     if sent_vendors:
         placement["vendors"] = sent_vendors
     sent_mode = effective_mode(request.vendors, request.regions, capacity_type,
-                               request.placement_mode)
+                               request.placement_mode, pinned)
     if sent_mode:
         placement["mode"] = sent_mode
     # HYPERUN-REGIONS. Dropped until 2026-09-08, exactly as `vendors` was: the CRD

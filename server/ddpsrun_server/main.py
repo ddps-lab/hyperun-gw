@@ -846,6 +846,11 @@ def _estimate_for(body: JudgementRequest) -> estimator.Estimate:
         # HYPERUN-DEFAULT-VENDORS: the mode picks which priced vendor is quoted,
         # the first in walk order (ordered) or the cheapest.
         placement_mode=body.placement_mode,
+        # HYPERUN-INSTANCE-PIN. A pinned job is priced on its own machine, and the
+        # pod size decides how many of them it rents.
+        instance_type=body.instance_type,
+        cpus=body.cpus,
+        memory=body.memory,
     )
 
 
@@ -1043,6 +1048,11 @@ def _validation_for(body: JudgementRequest, request: Request,
         # HYPERUN-GROUP. Whether the pods need a rendezvous, and how big one is.
         group_size=(body.group.size if body.group else 1),
         group_mode=(body.group.mode if body.group else "independent"),
+        # HYPERUN-INSTANCE-PIN. Whether PACSrun can place the pinned machine and
+        # whether one pod fits on it; a no here keeps the job from being created.
+        instance_type=body.instance_type,
+        cpus=body.cpus,
+        memory=body.memory,
     )
 
 

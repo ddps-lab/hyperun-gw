@@ -200,6 +200,22 @@ any vendor", was shown Shadeform's price, and was bought on AWS, the only candid
 job naming regions, or asking for spot, is still sent without the default vendors --
 neither Shadeform nor RunPod sells spot, so a spot ask goes to AWS alone.
 
+**`--instance-type` pins the exact AWS machine, and only the user can ask for it.** Pass
+it when the USER names a machine ("run it on a c7i.large", "the same g6.xlarge as last
+time"), exactly as they wrote it. Never pick one yourself and never turn a GPU or a size
+into one: a pinned job runs on that type or waits, because the solver then considers
+nothing else -- not a cheaper machine, not another zone's stock of a different type.
+
+- It is AWS only. With it, pass no `--vendor` but `aws`, no region that is not AWS, and
+  no `--gpu-*`: a pinned GPU machine is rented whole, cards included.
+- `hyperun validate` refuses what PACSrun could not place -- an arm64 machine, a Xen
+  family such as t2, a type with no row in the solver's CoreMark table -- and a pod that
+  does not fit on the machine. Read the `instance-type-pinned` line to the user: it says
+  how many machines the job rents.
+- If the CLI says "this server does not know instance_type", the server is older than
+  the CLI and would drop the pin and run the job anyway. Tell the user and stop; do not
+  submit without the flag on their behalf.
+
 ## Step 3 — validate, and stop on an error
 
 ```bash

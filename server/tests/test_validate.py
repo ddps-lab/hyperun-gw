@@ -602,3 +602,81 @@ def test_a_script_that_is_the_training_command_still_assumes_dpo():
                         cap=12288, vram_gb=40, job_estimate=KNOWN,
                         gpu_name="L40S", gpu_count=1, capacity_type="on-demand")
     assert "trl-patch-missing" in {f.code for f in result.findings}
+
+
+# ---------------------------------------------------------------- HYPERUN-INSTANCE-PIN
+#
+# A pin skips every refusal PACSrun puts on an unpinned ask, so a machine its routes
+# cannot place is accepted there and the job waits in Pending for good. Each ERROR
+# below keeps such a job from being created (HYPERUN-SUBMIT-VALIDATES).
+
+
+def pin(instance_type, vendors=(), regions=None, cpus="2", memory="4Gi", parallelism=1,
+        capacity_type="spot"):
+    return v.check_instance_pin(instance_type, list(vendors), regions, cpus, memory,
+                                parallelism, capacity_type)
+
+
+def pin_codes(findings):
+    return {finding.code for finding in findings}
+
+
+def test_no_pin_says_nothing():
+    assert pin(None) == []
+
+
+def test_an_unknown_type_is_refused_with_the_names_it_was_probably_meant_to_be():
+    [finding] = pin("t3.xlarg")
+    assert (finding.level, finding.code) == (v.ERROR, "pin-unknown-type")
+    assert "1,354 AWS types" in finding.message
+    assert "t3.xlarge" in finding.fix
+
+
+@pytest.mark.parametrize("name, says", [
+    ("m7g.large", "arm64 machine"),
+    ("t2.large", "Xen-based machine"),
+    ("c5.metal", "no row in PACSrun's CoreMark table"),
+])
+def test_a_type_pacsrun_cannot_place_is_refused_with_its_reason(name, says):
+    findings = pin(name, cpus="1", memory="1Gi")
+    finding = next(f for f in findings if f.code == "pin-not-placeable")
+    assert finding.level == v.ERROR and says in finding.message
+    assert "wait in Pending" in finding.message
+
+
+def test_a_pin_names_aws_and_nothing_else():
+    assert "pin-not-aws" in pin_codes(pin("t3.xlarge", vendors=["runpod"]))
+    assert "pin-not-aws" in pin_codes(pin("t3.xlarge", regions=["shadeform"]))
+    assert "pin-not-aws" not in pin_codes(
+        pin("t3.xlarge", vendors=["aws"], regions=["aws/us-east-1", "us-east-2"]))
+
+
+def test_a_bare_aws_region_is_refused_for_a_cpu_pin_only():
+    # The CPU solver gets the word "aws" as its one region and fails (2026-10-07). A
+    # GPU pin goes to the SkyPilot-catalogue route first, which reads "aws" as every
+    # region.
+    assert "pin-bare-aws-region" in pin_codes(pin("t3.xlarge", regions=["aws"]))
+    assert "pin-bare-aws-region" not in pin_codes(
+        pin("g6.xlarge", regions=["aws"], cpus="1", memory="1Gi", capacity_type="on-demand"))
+
+
+def test_a_pod_that_does_not_fit_is_refused_with_the_solvers_arithmetic():
+    findings = pin("m7i.large", cpus="2", memory="4Gi")
+    finding = next(f for f in findings if f.code == "pin-does-not-fit")
+    assert finding.level == v.ERROR
+    assert "1.72 vCPU" in finding.message and "210m and 444 MiB" in finding.message
+
+
+def test_a_placeable_pin_says_how_many_machines_it_rents():
+    # The 2026-10-07 demo shape: 2 vCPU / 4Gi pods, one per t3.xlarge.
+    [finding] = pin("t3.xlarge", regions=["aws/us-east-1"], parallelism=4)
+    assert (finding.level, finding.code) == (v.INFO, "instance-type-pinned")
+    assert "4 pod(s) rent 4 machine(s)" in finding.message
+
+
+def test_validate_refuses_a_pin_it_cannot_place_and_names_what_it_did_not_check():
+    result = v.validate(env={}, script=None, cap=None, vram_gb=None, job_estimate=KNOWN,
+                        capacity_type="spot", instance_type="m7g.large", cpus="1",
+                        memory="1Gi")
+    assert not result.ok and "pin-not-placeable" in codes(result)
+    assert any("in stock" in line for line in result.not_checked)

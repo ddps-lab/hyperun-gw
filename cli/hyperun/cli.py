@@ -167,6 +167,14 @@ def job_arguments() -> argparse.ArgumentParser:
     )
     shared.add_argument("--cpus", help='CPU request, e.g. "4"')
     shared.add_argument("--memory", help='memory request, e.g. "16Gi"')
+    # HYPERUN-INSTANCE-PIN. The exact machine. PACSrun's CRD has had it all along.
+    shared.add_argument(
+        "--instance-type", metavar="TYPE",
+        help="the exact AWS machine to run on, e.g. t3.xlarge. Leave it out to let the "
+        "solver choose: a pinned job runs on this type or waits. AWS only, and not "
+        "with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says "
+        "whether PACSrun can place it and how many machines the job rents.",
+    )
     shared.add_argument(
         "--expected-hours", type=float, help="your own guess at the runtime, in hours"
     )
@@ -540,6 +548,15 @@ def build_submit_body(args: argparse.Namespace) -> dict[str, Any]:
         body["cpus"] = args.cpus
     if args.memory:
         body["memory"] = args.memory
+    if getattr(args, "instance_type", None):
+        if args.gpu_vram or args.gpu_name or args.gpu_count:
+            # Both on one command line: the user said two things about the GPU.
+            raise SystemExit(
+                "--instance-type names the machine, and with it the GPU: a pinned GPU "
+                "machine is rented whole. Give --instance-type or the --gpu-* flags, "
+                "not both."
+            )
+        body["instance_type"] = args.instance_type
     if args.expected_hours is not None:
         body["expected_hours"] = args.expected_hours
     if getattr(args, "parallelism", None) is not None:
@@ -635,6 +652,39 @@ def build_submit_body(args: argparse.Namespace) -> dict[str, Any]:
             "--image, or in a file with -f. `hyperun schema` prints every field."
         )
     return body
+
+
+# HYPERUN-INSTANCE-PIN. Request fields that a server older than this CLI may not know.
+#
+# THE SERVER DROPS A FIELD IT DOES NOT KNOW, IT DOES NOT REFUSE IT -- deliberately, so
+# that an older server keeps working for a newer CLI (its SubmitRequest says why). For
+# most fields that is harmless. For these it is not: a pinned job sent to a server
+# without `instance_type` is accepted, the pin is gone, and the job runs on whatever
+# the solver picks, with nothing anywhere saying so. So before a body that uses one
+# of them leaves, the server's own schema is asked whether it knows the field. That
+# is one unauthenticated GET, made only when such a field is in the body -- which
+# also covers a body read from -f.
+FIELDS_A_SERVER_MUST_KNOW = ("instance_type",)
+
+
+def require_known_fields(client: Any, body: dict[str, Any]) -> None:
+    """Stop before sending a field the server would silently drop.
+
+    Raises:
+        SystemExit: the body uses a field from FIELDS_A_SERVER_MUST_KNOW and the
+            server's /v1/schema does not list it.
+    """
+    used = [name for name in FIELDS_A_SERVER_MUST_KNOW if body.get(name)]
+    if not used:
+        return
+    known = (client.schema() or {}).get("properties") or {}
+    missing = [name for name in used if name not in known]
+    if missing:
+        raise SystemExit(
+            f"this server does not know {', '.join(missing)}. It would drop the field "
+            f"and still run the job, on whatever machine its solver picks. Ask whoever "
+            f"runs the server to upgrade it, or leave --instance-type out."
+        )
 
 
 def refreshed(credentials: config.Credentials) -> config.Credentials:
@@ -770,7 +820,9 @@ def cmd_schema(args: argparse.Namespace) -> int:
 def cmd_submit(args: argparse.Namespace) -> int:
     """Submit a job and print where its output will go."""
     body = build_submit_body(args)
-    result = client_from_config().submit(body)
+    client = client_from_config()
+    require_known_fields(client, body)
+    result = client.submit(body)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
@@ -783,7 +835,9 @@ def cmd_submit(args: argparse.Namespace) -> int:
 def cmd_estimate(args: argparse.Namespace) -> int:
     """Print how long a job will take, what it will cost, and which GPU it wants."""
     body = build_submit_body(args)
-    result = client_from_config().estimate(body)
+    client = client_from_config()
+    require_known_fields(client, body)
+    result = client.estimate(body)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return EXIT_OK
@@ -846,7 +900,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
         submit on this.
     """
     body = build_submit_body(args)
-    result = client_from_config().validate(body)
+    client = client_from_config()
+    require_known_fields(client, body)
+    result = client.validate(body)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return EXIT_OK if result["ok"] else EXIT_SERVER

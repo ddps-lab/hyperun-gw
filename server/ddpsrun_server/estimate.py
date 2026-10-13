@@ -41,6 +41,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from . import instance_types
 from .measurements import (
     AWS_PRICE_REGION,
     billed_pod_rate,
@@ -634,10 +635,83 @@ def vendors_to_price(vendors: list[str] | None, regions: list[str] | None,
     return list(DEFAULT_ORDER)
 
 
+def pinned_rate(name: str, parallelism: int, capacity: str,
+                regions: list[str] | None, mode: str | None,
+                cpus: str | None, memory: str | None) -> Rate:
+    """What one hour costs for a job that names its machine (HYPERUN-INSTANCE-PIN).
+
+    THE MACHINE IS THE USER'S, SO ONLY THE COUNT AND THE REGION ARE WORKED OUT. The
+    count is the solver's own packing (`instance_types.pods_per_machine`), so 4 pods
+    of 2 vCPU on t3.xlarge rent 4 machines, not 2: a t3.xlarge leaves 3.71 vCPU for
+    pods. The region follows the walk: `ordered` (the default) buys in the first
+    region that answers, so that is the price quoted; `cheapest` and `compare` rank
+    every region, so the cheapest is. With no AWS region named, the job goes to the
+    operator's one default region, which is the only one priced (HYPERUN-AWS-ONE-REGION).
+
+    Args:
+        name: the pinned instance type.
+        parallelism: how many pods.
+        capacity: "spot" or "on-demand".
+        regions: `placement.regions` as the caller wrote it.
+        mode: `placement.mode` as the caller wrote it.
+        cpus: one pod's CPU request, as written.
+        memory: one pod's memory request, as written.
+
+    Returns:
+        A `Rate`. Its numbers are None when the type is unknown, does not fit one pod,
+        or has no price for this capacity in these regions; `basis` says which.
+    """
+    machine = instance_types.lookup(name)
+    if machine is None:
+        return Rate(None, None, f"{name} is not an instance type PACSrun knows, so there "
+                                f"is no price to look up.")
+    where = instance_types.aws_regions(regions) or [AWS_PRICE_REGION]
+    ordered = mode in (None, "ordered")
+    row = instance_types.price_in(name, where, capacity, first_that_sells=ordered)
+    if row is None:
+        return Rate(None, None,
+                    f"AWS cannot be priced: the catalogue of "
+                    f"{instance_types.priced_on()} has no {capacity} price for {name} in "
+                    f"{', '.join(where)}.", "aws")
+    per_machine = instance_types.pods_per_machine(machine, cpus, memory)
+    if per_machine == 0:
+        return Rate(None, None,
+                    f"one pod of this size does not fit on {name}, so no number of them "
+                    f"would hold the job; /v1/validate gives the arithmetic.", "aws")
+    unread = per_machine is None
+    pods = max(1, parallelism)
+    count_machines = pods if unread else -(-pods // per_machine)
+    if capacity == "spot" and row.spot_low is not None and row.spot_high is not None:
+        low = round(row.spot_low * count_machines, 4)
+        high = round(row.spot_high * count_machines, 4)
+        sold = (f"spot, {row.zones} availability zone(s) in {row.region} spanning "
+                f"${row.spot_low:.4f}-${row.spot_high:.4f} per machine-hour")
+    else:
+        low = high = round((row.usd_per_hour or 0.0) * count_machines, 4)
+        sold = f"on-demand list price in {row.region}"
+    if unread:
+        seats = ", one pod per machine because cpus or memory could not be read"
+    elif per_machine > 1:
+        seats = f", {per_machine} pod(s) per machine"
+    else:
+        seats = ""
+    picked = ("" if len(where) == 1 else
+              f" It is the first of {', '.join(where)} that sells it, which is where an "
+              f"ordered walk buys." if ordered else
+              f" It is the cheapest of {', '.join(where)}.")
+    return Rate(low, high,
+                f"AWS {count_machines} x {name} (pinned{seats}) at {sold}, read from the "
+                f"catalogue on {instance_types.priced_on()}. Vendor prices move.{picked}",
+                "aws", count_machines)
+
+
 def hourly_rate(gpu_name: str, gpu_count: int, parallelism: int,
                 vendors: list[str] | None, capacity: str,
                 regions: list[str] | None = None,
-                mode: str | None = None) -> Rate:
+                mode: str | None = None,
+                instance_type: str | None = None,
+                cpus: str | None = None,
+                memory: str | None = None) -> Rate:
     """What one hour of this job's machines costs.
 
     THE DEFECT THIS FIXES, WHICH WAS A WRONG NUMBER AND NOT A MISSING ONE.
@@ -684,11 +758,17 @@ def hourly_rate(gpu_name: str, gpu_count: int, parallelism: int,
             number (PACSrun's placement.go:376, HYPERUN-AWS-ONE-REGION). Only
             the `aws/<region>` entries are read; a bare vendor word names no
             region and leaves the default in place.
+        instance_type: the machine the job pins, or None. A pinned job is priced
+            on that machine alone (`pinned_rate`), and `cpus` and `memory` decide
+            how many of them it rents.
 
     Returns:
         A `Rate`. Its numbers are None only when NO asked vendor can be priced
         for this ask, and then `basis` gives each vendor's reason.
     """
+    if instance_type:
+        return pinned_rate(instance_type, parallelism, capacity, regions, mode,
+                           cpus, memory)
     per_pod = max(1, gpu_count)
     pods = max(1, parallelism)
     asked = vendors_to_price(vendors, regions, capacity)
@@ -978,6 +1058,9 @@ def estimate(
     asked_capacity: str | None = None,
     regions: list[str] | None = None,
     placement_mode: str | None = None,
+    instance_type: str | None = None,
+    cpus: str | None = None,
+    memory: str | None = None,
 ) -> Estimate:
     """Answer everything `/v1/estimate` is asked, or say why we cannot.
 
@@ -1011,6 +1094,8 @@ def estimate(
             and quoting the on-demand rate to somebody who typed `spot` is a
             number about a machine they are not buying.
         regions: `placement.regions`, passed through to `hourly_rate`.
+        instance_type: the pinned machine, with `cpus` and `memory`, passed through
+            to `hourly_rate` (HYPERUN-INSTANCE-PIN).
 
     Returns:
         An `Estimate`. Fields we could not compute are None and `basis` says
@@ -1080,7 +1165,7 @@ def estimate(
     # to the machine that will actually be bought.
     priced_as = asked_capacity or kind
     rate = hourly_rate(gpu_name, gpu_count, parallelism, vendors, priced_as,
-                       regions, placement_mode)
+                       regions, placement_mode, instance_type, cpus, memory)
     if asked_capacity and asked_capacity != kind:
         warnings.append(
             f"the rate above is for {asked_capacity}, which is what was asked "

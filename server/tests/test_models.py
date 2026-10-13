@@ -215,6 +215,57 @@ def test_a_cpu_only_job_asks_for_no_gpu():
     assert obj["spec"]["resources"] == {"cpus": "4", "memory": "16Gi"}
 
 
+# ---------------------------------------------------------------- HYPERUN-INSTANCE-PIN
+
+
+def test_a_pinned_machine_reaches_the_hyperunjob():
+    # Until 2026-10-13 nothing here could write spec.resources.instanceType, so a
+    # job could not name its machine through this API at all.
+    obj = to_hyperunjob(minimal(cpus="2", memory="4Gi", instance_type="t3.xlarge"),
+                        ALICE, SETTINGS, JOB_ID, "spot")
+    assert obj["spec"]["resources"] == {"cpus": "2", "memory": "4Gi",
+                                        "instanceType": "t3.xlarge"}
+
+
+def test_a_pinned_job_goes_to_aws_alone_and_buys_without_comparing():
+    # A pin names an AWS type. With no vendor and no region the job would otherwise
+    # go out with Shadeform and RunPod as well, and in `cheapest` mode: two candidates
+    # that cannot sell the machine. An empty placement is PACSrun's "AWS alone".
+    obj = to_hyperunjob(minimal(instance_type="t3.xlarge"), ALICE, SETTINGS, JOB_ID,
+                        "on-demand")
+    assert obj["spec"]["placement"] == {"capacityType": "on-demand"}
+
+
+def test_a_pinned_job_keeps_the_regions_it_named():
+    obj = to_hyperunjob(minimal(instance_type="t3.xlarge", regions=["aws/us-east-1"]),
+                        ALICE, SETTINGS, JOB_ID, "spot")
+    assert obj["spec"]["placement"] == {"capacityType": "spot", "regions": ["aws/us-east-1"]}
+
+
+def test_a_pin_and_a_gpu_ask_are_refused_together():
+    # PACSrun's CRD refuses the pair ("specify at most one of resources.instanceType
+    # or resources.gpus"); this says so before a request reaches it.
+    with pytest.raises(ValidationError, match="cannot be used together"):
+        minimal(instance_type="g6.xlarge", gpu={"name": "L4"})
+
+
+@pytest.mark.parametrize("name", [" t3.xlarge", "t3.xlarge ", "T3.XLARGE", "t3", ""])
+def test_a_pinned_name_is_sent_exactly_as_written_or_refused(name):
+    # PACSrun looks the name up as written, so " t3.xlarge" would pass a trimmed check
+    # here and then be unknown there.
+    with pytest.raises(ValidationError):
+        minimal(instance_type=name)
+
+
+def test_a_field_this_server_does_not_know_is_dropped():
+    # ★ The user's decision on 2026-10-13: a newer client's field is dropped, not
+    # refused, so an older server keeps working for a newer CLI. A client that
+    # needs a field checks /v1/schema first (the CLI does, for instance_type).
+    request = SubmitRequest(name="n", image="img", a_field_from_the_future="x")
+    assert "a_field_from_the_future" not in request.model_dump()
+    assert SubmitRequest.model_config.get("extra") == "ignore"
+
+
 def test_expected_hours_is_recorded_but_not_acted_on():
     obj = to_hyperunjob(minimal(expected_hours=8.0), ALICE, SETTINGS, JOB_ID)
     assert obj["metadata"]["annotations"]["hyperun.io/expected-hours"] == "8.0"

@@ -1473,3 +1473,58 @@ def test_a_refusal_from_the_server_is_not_swallowed(monkeypatch, capsys):
     assert cli.main(["pause", "job-abc123abc123"]) != 0
     assert "Succeeded" in capsys.readouterr().err
 
+
+
+# ------------------------------------------------------------ HYPERUN-INSTANCE-PIN
+
+
+def test_an_instance_type_goes_into_the_body_as_written():
+    body = cli.build_submit_body(args_for(
+        ["submit", "--name", "x", "--image", "i", "--cpus", "2", "--memory", "4Gi",
+         "--instance-type", "t3.xlarge"]))
+    assert body["instance_type"] == "t3.xlarge"
+    assert "gpu" not in body
+
+
+def test_an_instance_type_and_a_gpu_flag_together_are_refused():
+    with pytest.raises(SystemExit, match="not both"):
+        cli.build_submit_body(args_for(
+            ["submit", "--name", "x", "--image", "i", "--instance-type", "g6.xlarge",
+             "--gpu-name", "L4"]))
+
+
+def test_estimate_validate_and_submit_all_take_an_instance_type():
+    parser = cli.build_parser()
+    shared = ["--name", "x", "--image", "i", "--instance-type", "t3.xlarge"]
+    bodies = [cli.build_submit_body(parser.parse_args([command] + shared))
+              for command in ("estimate", "validate", "submit")]
+    assert bodies[0] == bodies[1] == bodies[2]
+
+
+@pytest.mark.parametrize("command", ["submit", "validate", "estimate"])
+def test_a_server_that_does_not_know_instance_type_is_never_sent_one(fake, capsys,
+                                                                     command):
+    # ★ That server would DROP the field and run the job anyway, on whatever machine
+    # its solver picks. The check reads the server's own schema before anything is
+    # sent, and only when the body pins a machine.
+    fake.schema = lambda: {"properties": {"name": {}, "image": {}}}
+    sent = []
+    fake.validate = fake.estimate = lambda body: sent.append(body)
+    assert run([command, "--name", "x", "--image", "i",
+                "--instance-type", "t3.xlarge"]) == cli.EXIT_USAGE
+    assert "does not know instance_type" in capsys.readouterr().err
+    assert fake.submitted is None and sent == []
+
+
+def test_a_server_that_knows_instance_type_is_sent_it(fake):
+    fake.schema = lambda: {"properties": {"instance_type": {}}}
+    assert run(["submit", "--name", "x", "--image", "i",
+                "--instance-type", "t3.xlarge"]) == cli.EXIT_OK
+    assert fake.submitted["instance_type"] == "t3.xlarge"
+
+
+def test_a_job_without_a_pin_does_not_ask_for_the_schema(fake):
+    def no_schema():
+        raise AssertionError("the schema was fetched for a job that pins nothing")
+    fake.schema = no_schema
+    assert run(["submit", "--name", "x", "--image", "i"]) == cli.EXIT_OK
