@@ -15,6 +15,8 @@ Grep anchor: HYPERUN-AWS-PRICES
 """
 from __future__ import annotations
 
+import pytest
+
 from ddpsrun_server import catalogue, estimate as e, measurements as m, models
 
 
@@ -722,3 +724,99 @@ def test_a_spot_ask_naming_nothing_is_priced_on_aws_alone():
     assert e.vendors_to_price(None, None, "spot") == ["aws"]
     rate = e.hourly_rate("L40S", 1, 1, None, "spot")
     assert rate.vendor == "aws"
+
+
+# ---------------------------------------------------------------- HYPERUN-INSTANCE-PIN
+#
+# A job that names its machine. Every count below is from the two generated tables
+# (tools/gen_aws_types.py, PACSrun main 0ad3798 and the SkyPilot catalogue file of
+# 2026-09-28); regenerating them is expected to move the prices, not the verdicts.
+
+it = e.instance_types
+
+
+def test_the_pin_tables_ship_with_the_package():
+    types = it.types()
+    assert len(types) == 1354  # every type in PACSrun's catalogue, placeable or not
+    verdicts = {}
+    for machine in types.values():
+        verdicts[machine.refused] = verdicts.get(machine.refused, 0) + 1
+    assert verdicts == {"": 601, "arm64": 404, "xen": 74, "no-route": 275}
+    assert it.catalogue_on() == "2026-08-03" and it.priced_on() == "2026-09-28"
+
+
+@pytest.mark.parametrize("name, refused", [
+    ("t3.xlarge", ""),          # the demo's machine
+    ("g6.xlarge", ""),          # a GPU machine the GPU route answers
+    ("m7g.large", "arm64"),     # Graviton: the solver drops arm64 rows
+    ("t2.micro", "xen"),        # the driver cannot read a Xen machine's console
+    ("c5.metal", "no-route"),   # no CoreMark row, so the CPU solver cannot rank it
+])
+def test_each_type_carries_the_reason_pacsrun_could_not_place_it(name, refused):
+    assert it.lookup(name).refused == refused
+
+
+def test_the_machine_count_is_the_solvers_packing():
+    # Observed 2026-10-07 (job-cfbf0b5ee6ea): of 4 pods of 2 vCPU / 4Gi, a t3.xlarge
+    # held pod 0 alone and a t3a.2xlarge held pods 1-3. The solver leaves a
+    # t3.xlarge 3.71 vCPU for pods (4 - 0.08 kube-reserved - 0.21 DaemonSets).
+    assert it.pods_per_machine(it.lookup("t3.xlarge"), "2", "4Gi") == 1
+    assert it.pods_per_machine(it.lookup("t3a.2xlarge"), "2", "4Gi") == 3
+    assert round(it.room(it.lookup("t3.xlarge")).cpus, 2) == 3.71
+    # A pinned GPU machine is claimed whole: one pod however small.
+    assert it.pods_per_machine(it.lookup("g6.12xlarge"), "1", "1Gi") == 1
+    # Nothing stated is PACSrun's own default, 1 vCPU and 1 GiB.
+    assert it.pods_per_machine(it.lookup("t3.xlarge"), None, None) == 3
+    # Unreadable is not zero: the caller has to say "could not judge".
+    assert it.pods_per_machine(it.lookup("t3.xlarge"), "two", "4Gi") is None
+
+
+def test_a_pinned_job_is_priced_on_its_own_machine():
+    rate = e.hourly_rate("", 1, 1, None, "on-demand", ["aws/us-east-1"], None,
+                         "t3.xlarge", "2", "4Gi")
+    assert (rate.vendor, rate.machines) == ("aws", 1)
+    assert rate.usd_per_hour_low == rate.usd_per_hour_high == 0.1664
+    assert "1 x t3.xlarge (pinned)" in rate.basis
+
+
+def test_a_pinned_spot_job_is_priced_over_its_zones_and_its_machine_count():
+    rate = e.hourly_rate("", 1, 1, None, "spot", ["aws/us-east-1"], None,
+                         "t3.xlarge", "2", "4Gi")
+    assert (rate.usd_per_hour_low, rate.usd_per_hour_high) == (0.0438, 0.0643)
+    four = e.hourly_rate("", 1, 4, None, "spot", ["aws/us-east-1"], None,
+                         "t3a.2xlarge", "2", "4Gi")
+    assert four.machines == 2 and "3 pod(s) per machine" in four.basis
+
+
+def test_a_pin_with_no_region_is_priced_in_the_default_region():
+    rate = e.hourly_rate("", 1, 1, None, "on-demand", None, None, "t3.xlarge", None, None)
+    assert "in us-west-2" in rate.basis
+
+
+def test_the_walk_decides_which_region_a_pin_is_priced_in():
+    # `ordered` buys in the first region that answers; `cheapest` ranks them all.
+    # t3.xlarge spot: us-west-2 from $0.0586, us-east-1 from $0.0438.
+    regions = ["aws/us-west-2", "aws/us-east-1"]
+    first = e.hourly_rate("", 1, 1, None, "spot", regions, None, "t3.xlarge", "2", "4Gi")
+    cheapest = e.hourly_rate("", 1, 1, None, "spot", regions, "cheapest",
+                             "t3.xlarge", "2", "4Gi")
+    assert "in us-west-2" in first.basis and first.usd_per_hour_low == 0.0586
+    assert "in us-east-1" in cheapest.basis and cheapest.usd_per_hour_low == 0.0438
+
+
+def test_a_pin_that_cannot_hold_one_pod_is_not_priced():
+    # m7i.large has 2 vCPU and leaves 1.72 for pods, so a 2-vCPU pod never fits.
+    rate = e.hourly_rate("", 1, 1, None, "on-demand", None, None, "m7i.large", "2", "4Gi")
+    assert rate.usd_per_hour_low is None and "does not fit" in rate.basis
+
+
+def test_the_estimate_prices_a_pin_instead_of_a_gpu():
+    estimate = e.estimate(gpu_name="", cap=None, pairs=None, epochs=None, row_tokens=None,
+                          asked_capacity="spot", regions=["aws/us-east-1"],
+                          instance_type="t3.xlarge", cpus="2", memory="4Gi")
+    assert estimate.rate.vendor == "aws" and estimate.rate.usd_per_hour_low == 0.0438
+
+
+def test_only_aws_regions_are_read_for_a_pin():
+    assert it.aws_regions(["aws/us-east-1", "us-east-2", "aws", "runpod",
+                           "shadeform/houston-usa-1"]) == ["us-east-1", "us-east-2"]

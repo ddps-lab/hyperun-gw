@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
-from . import measurements
+from . import instance_types, measurements
 
 AWS_GPUS_FILE = "aws_gpus.csv"
 
@@ -94,9 +94,16 @@ def requested_gpus(spec: dict[str, Any]) -> tuple[int | None, str | None]:
     Returns:
         (count, name). (None, None) for a job that asked for no GPU. The CRD fills
         an omitted count with 1, so an absent count on a GPU request reads as 1.
+        A job that pinned a GPU machine (resources.instanceType, no gpus) asked for
+        every card on it: PACSrun claims a pinned GPU box whole (its
+        placement.go:1357-1360), so the count and model are the machine's.
     """
-    gpus = (spec.get("resources") or {}).get("gpus")
+    resources = spec.get("resources") or {}
+    gpus = resources.get("gpus")
     if not isinstance(gpus, dict) or not gpus:
+        pinned = instance_types.lookup(str(resources.get("instanceType") or ""))
+        if pinned is not None and pinned.gpus > 0:
+            return pinned.gpus, pinned.gpu or None
         return None, None
     count = int(gpus.get("count") or 1)
     if count <= 0:

@@ -97,3 +97,20 @@ def test_the_aws_table_ships_and_leaves_cpu_machines_out():
     assert table["g6.2xlarge"] == "L4"
     assert table["g4dn.xlarge"] == "T4"
     assert "t3.xlarge" not in table
+
+
+def test_a_job_that_pinned_a_gpu_machine_reports_every_card_on_it():
+    # HYPERUN-INSTANCE-PIN. A pinned GPU machine is claimed whole (PACSrun's
+    # placement.go:1357-1360): the spec names no gpus, and the job still has the
+    # machine's four L4s. Without this the console would leave the GPU line out.
+    job = _job("aws", "g6.12xlarge")
+    job["spec"]["resources"]["instanceType"] = "g6.12xlarge"
+    view = JobView.from_hyperunjob(job)
+    assert (view.instance, view.gpu_model, view.gpu_count) == ("g6.12xlarge", "L4", 4)
+
+
+def test_a_job_that_pinned_a_cpu_machine_reports_no_gpu():
+    job = _job("aws", "t3.xlarge")
+    job["spec"]["resources"]["instanceType"] = "t3.xlarge"
+    view = JobView.from_hyperunjob(job)
+    assert (view.instance, view.gpu_model, view.gpu_count) == ("t3.xlarge", None, None)

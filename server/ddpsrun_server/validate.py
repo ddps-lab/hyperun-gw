@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 
 from . import catalogue
 from . import estimate as estimator
+from . import instance_types
 from . import secret_expiry
 from . import models          # HYPERUN-VENDOR-CHOICE: the two vendor lists live there
 from . import measurements
@@ -659,6 +660,130 @@ def check_runtime(job_estimate: estimator.Estimate) -> list[Finding]:
     return findings
 
 
+def _vendor_of(entry: str) -> str:
+    """The vendor a placement.regions entry names: its first word when that is a
+    vendor, AWS otherwise ("us-east-1" and "aws/us-east-1" are both AWS)."""
+    head = entry.strip().split("/", 1)[0]
+    return head if head in models.KNOWN_VENDORS else "aws"
+
+
+def check_instance_pin(instance_type: str | None, vendors: list[str],
+                       regions: list[str] | None, cpus: str | None,
+                       memory: str | None, parallelism: int,
+                       capacity_type: str | None) -> list[Finding]:
+    """Can PACSrun place the machine this job pins (HYPERUN-INSTANCE-PIN).
+
+    A pin skips every refusal PACSrun puts on an unpinned ask (its filter.go:99-103)
+    and hands the solver one name. When that name is one PACSrun's routes cannot
+    place, nothing refuses it there: the job is created and waits in Pending for
+    good. So each ERROR below is a job that would never start, and /v1/jobs refuses
+    it (HYPERUN-SUBMIT-VALIDATES). `instance_types` holds the tables and the
+    solver's arithmetic; this function only words what they say.
+
+    Args:
+        instance_type: the pinned machine, or None.
+        vendors: `placement.vendors` as written.
+        regions: `placement.regions` as written.
+        cpus: one pod's CPU request, as written.
+        memory: one pod's memory request, as written.
+        parallelism: how many pods.
+        capacity_type: "spot", "on-demand", or None.
+
+    Returns:
+        Findings. Nothing when the job pins no machine.
+    """
+    if not instance_type:
+        return []
+    machine = instance_types.lookup(instance_type)
+    if machine is None:
+        close = instance_types.suggestions(instance_type)
+        return [Finding(
+            ERROR, "pin-unknown-type",
+            f"{instance_type} is not an instance type PACSrun knows: its catalogue lists "
+            f"{len(instance_types.types()):,} AWS types (fetched "
+            f"{instance_types.catalogue_on()}) and PACSrun refuses any other name "
+            f"(internal/pacs/filter.go:216-219).",
+            (f"Did you mean {' or '.join(close)}? " if close else "")
+            + "Check the spelling, or leave instance_type out and let the solver choose.")]
+
+    findings: list[Finding] = []
+    if machine.refused:
+        findings.append(Finding(
+            ERROR, "pin-not-placeable",
+            instance_types.REFUSALS[machine.refused].format(name=instance_type)
+            + " The job would be created and wait in Pending.",
+            "Pin an x86_64 machine PACSrun can rank, or leave instance_type out and let "
+            "the solver choose."))
+
+    foreign = ([v for v in vendors if v != "aws"]
+               + [entry for entry in regions or [] if _vendor_of(entry) != "aws"])
+    if foreign:
+        findings.append(Finding(
+            ERROR, "pin-not-aws",
+            f"instance_type names an AWS machine, and this job also names "
+            f"{', '.join(foreign)}. RunPod refuses a pinned job outright (PACSrun's "
+            f"vendorpod.go, gpusPerPod) and no other vendor sells an AWS instance type, "
+            f"so those candidates can only fail.",
+            "Leave vendors out (a pinned job goes to AWS alone), or name only aws and "
+            "AWS regions."))
+    if machine.gpus == 0 and any(entry.strip() == "aws" for entry in regions or []):
+        findings.append(Finding(
+            ERROR, "pin-bare-aws-region",
+            "a bare 'aws' in regions reaches PACSrun's CPU solver as the word 'aws' "
+            "instead of a region. The solver takes one real region per call, fails with "
+            "\"Error getting spot prices: 'InstanceType'\", and the job stays Pending "
+            "(seen 2026-10-07).",
+            "Name the regions, e.g. aws/us-east-1, or leave regions out for the "
+            "operator's default region."))
+
+    size = instance_types.pod_size(cpus, memory)
+    per_machine = instance_types.pods_per_machine(machine, cpus, memory)
+    if per_machine == 0 and size is not None:
+        left = instance_types.room(machine)
+        short = []
+        if left.cpus < size[0]:
+            short.append(f"{max(left.cpus, 0):.2f} vCPU")
+        if left.memory_gib < size[1]:
+            short.append(f"{max(left.memory_gib, 0):.2f} GiB")
+        if left.pod_slots is not None and left.pod_slots <= 0:
+            short.append(f"no pod slot (kubelet admits {machine.max_pods} pods and the "
+                         f"DaemonSets take {instance_types.DAEMONSET_POD_SLOTS})")
+        findings.append(Finding(
+            ERROR, "pin-does-not-fit",
+            f"one pod asking {size[0]:g} vCPU and {size[1]:g} GiB does not fit on "
+            f"{instance_type} ({machine.vcpus:g} vCPU, {machine.memory_gib:g} GiB). After "
+            f"what Kubernetes and this cluster's DaemonSets keep, PACSrun's solver leaves "
+            f"{' and '.join(short)} for pods (solver/kubepacs_cli.py:380-431; DaemonSets "
+            f"measured at {instance_types.DAEMONSET_CPU_MILLI:g}m and "
+            f"{instance_types.DAEMONSET_MEMORY_MIB:g} MiB on "
+            f"{instance_types.DAEMONSET_MEASURED_ON}), so it places no pod there.",
+            "Ask for less per pod, or pin a bigger machine."))
+
+    if capacity_type == "spot" and not machine.refused:
+        where = (instance_types.aws_regions(regions)
+                 or [measurements.DEFAULT_AWS_REGION])
+        if instance_types.price_in(instance_type, where, "spot", True) is None:
+            findings.append(Finding(
+                WARNING, "pin-no-spot-price",
+                f"the catalogue of {instance_types.priced_on()} has no spot price for "
+                f"{instance_type} in {', '.join(where)}. PACSrun drops a type with no "
+                f"spot price from a spot ask, so it may find nothing to buy.",
+                "Use capacity_type on-demand, or name another region."))
+
+    if not any(finding.level == ERROR for finding in findings):
+        pods = max(1, parallelism)
+        cards = f", {machine.gpus} x {machine.gpu}" if machine.gpus else ""
+        count = ("" if per_machine is None else
+                 f" One machine holds {per_machine} pod(s) of this size, so {pods} pod(s) "
+                 f"rent {-(-pods // per_machine)} machine(s).")
+        findings.append(Finding(
+            INFO, "instance-type-pinned",
+            f"pinned to {instance_type} ({machine.vcpus:g} vCPU, "
+            f"{machine.memory_gib:g} GiB{cards}). The solver considers this one machine "
+            f"and nothing else.{count}"))
+    return findings
+
+
 def check_vendors_can_run(vendors: list[str], placement_mode: str | None) -> list[Finding]:
     """Can the vendors that were named actually rent a machine.
 
@@ -1269,6 +1394,9 @@ def validate(
     secret_expiries: dict[str, str | None] | None = None,
     group_size: int = 1,
     group_mode: str = "independent",
+    instance_type: str | None = None,
+    cpus: str | None = None,
+    memory: str | None = None,
 ) -> Validation:
     """Run every check and sort what comes back.
 
@@ -1293,6 +1421,8 @@ def validate(
             Both are needed together, and passing secrets without this would
             make every name look unknown — so a caller that cannot supply the
             bindings passes neither and the check simply does not run.
+        instance_type: the machine the job pins, with one pod's `cpus` and
+            `memory`, which decide whether a pod fits on it. HYPERUN-INSTANCE-PIN.
 
     Returns:
         A `Validation`. `ok` is False when any finding is an error.
@@ -1304,6 +1434,8 @@ def validate(
     # a fact about PACSrun, a vendor or a credential -- not about what the job
     # computes.
     findings += check_vendors_can_run(vendors or [], placement_mode)
+    findings += check_instance_pin(instance_type, vendors or [], regions, cpus, memory,
+                                   parallelism, capacity_type)
     # vendors GOES IN, and until 2026-09-08 it did not: the check judged every
     # ask against AWS's catalogue, so `vendors: ["runpod"]` left an AWS-shaped
     # warning standing. A warning that survives the fix it asks for teaches a
@@ -1333,6 +1465,13 @@ def validate(
     findings.sort(key=lambda finding: order.get(finding.level, 3))
 
     not_checked = list(NOT_CHECKED)
+    if instance_type:
+        not_checked.insert(
+            0,
+            f"whether AWS has {instance_type} in stock where you asked. A pin leaves the "
+            f"solver nothing else to choose, so when no zone has it the job waits in "
+            f"Pending instead of moving to another machine.",
+        )
     if deferred is not None:
         not_checked.insert(
             0,
