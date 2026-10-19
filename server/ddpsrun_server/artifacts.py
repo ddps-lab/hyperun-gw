@@ -32,6 +32,23 @@ END-TO-END FLOW of one `GET /v1/jobs/{id}/artifacts`:
      not pass through Lambda, and they must not: a Lambda response is capped at
      about 6 MB and one adapter file measured 528,550,256 bytes (s39).
 
+AND OF ONE `GET /v1/jobs/{id}/serving-check` (HYPERUN-SERVING-CHECK-ROUTE), the one
+place this server DOES read a result file's bytes:
+
+  1. The route fetches the job through the same owner gate and splits the same
+     `spec.resultPath`, then names ONE key: the prefix plus SERVING_CHECK_FILE.
+  2. `read_small_object()` checks the same fence, calls GetObject once, and
+     refuses a file over SERVING_CHECK_MAX_BYTES before reading its body.
+  3. The route parses the JSON and hands it back only when it carries
+     SERVING_CHECK_SCHEMA.
+
+WHY THE SERVER READS THIS FILE WHEN IT READS NO OTHER. The screen draws the
+file's numbers, not a download link, and the browser cannot read S3 bytes
+itself: the results bucket has no CORS rule (`cors_rule: []` in PACSrun's
+terraform/registry state), so a page on another origin may FOLLOW a presigned
+URL but a `fetch()` of it is refused. The file is a few KB, so passing it
+through costs nothing the step-4 rule above protects against.
+
 WHY boto3 IS IMPORTED INSIDE A FUNCTION, NOT AT THE TOP. The Lambda runtime
 provides boto3, so this package deliberately does not depend on it — the same
 choice `lambda_handler.py` makes for the tokens secret. The tests never import
@@ -55,6 +72,25 @@ EXPIRES_SECONDS = 600
 # measured runs produced 5), so paginating further would only ever serve a
 # runaway job that wrote thousands — and for that, `truncated` says so.
 MAX_KEYS = 1000
+
+# HYPERUN-SERVING-CHECK-ROUTE. The result file a serving check job writes and the
+# schema it declares, both fixed by that job's script (the serving check's
+# serve_check.sh, write_result: `serving-check-result.json`,
+# `"schema": "hyperun.serving-check/v1"`).
+SERVING_CHECK_FILE = "serving-check-result.json"
+SERVING_CHECK_SCHEMA = "hyperun.serving-check/v1"
+# The most this server will read of it. The file is three bench summaries and a
+# comparison, a few KB; 256 KiB is far above that and still small enough that a
+# job writing something else under the name cannot make the route stream it.
+SERVING_CHECK_MAX_BYTES = 256 * 1024
+
+
+class NotUploaded(Exception):
+    """The key does not exist (yet): S3 answered NoSuchKey to GetObject."""
+
+
+class TooLarge(Exception):
+    """The object is bigger than the caller agreed to read."""
 
 
 class ForeignResultPath(Exception):
@@ -186,3 +222,54 @@ def list_artifacts(
             )
         )
     return Listing(files=files, truncated=bool(answer.get("IsTruncated", False)))
+
+
+def read_small_object(
+    bucket: str,
+    key: str,
+    result_bucket: str,
+    result_prefix: str,
+    max_bytes: int,
+) -> bytes:
+    """Read one small object under this deployment's result prefix.
+
+    HYPERUN-SERVING-CHECK-ROUTE, step 2 of the flow above. One GetObject; the
+    size is checked from its ContentLength BEFORE the body is read, so an object
+    over the limit costs one request and no transfer.
+
+    Args:
+        bucket, key: the object, the key built from the job's own resultPath.
+        result_bucket, result_prefix: the fence `is_ours` checks.
+        max_bytes: the most to read.
+
+    Returns:
+        The object's bytes.
+
+    Raises:
+        ForeignResultPath: the key is outside our bucket or prefix. Raised before
+            any S3 call.
+        NotUploaded: S3 answered NoSuchKey.
+        TooLarge: the object is larger than max_bytes.
+        botocore.exceptions.ClientError: any other refusal, e.g. AccessDenied when
+            the role lacks s3:GetObject; the route reports it as 502.
+    """
+    if not is_ours(bucket, key, result_bucket, result_prefix):
+        raise ForeignResultPath(
+            f"this job's resultPath points at s3://{bucket}/{key}, which is outside "
+            f"this server's result bucket, so it was not read"
+        )
+    client = s3_client()
+    try:
+        answer = client.get_object(Bucket=bucket, Key=key)
+    except Exception as exc:  # noqa: BLE001 - botocore's ClientError, read without importing it
+        code = ((getattr(exc, "response", None) or {}).get("Error") or {}).get("Code")
+        if code in ("NoSuchKey", "404"):
+            raise NotUploaded(key) from exc
+        raise
+    size = int(answer.get("ContentLength") or 0)
+    if size > max_bytes:
+        raise TooLarge(f"{key} is {size:,} bytes; at most {max_bytes:,} are read")
+    body = answer["Body"].read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise TooLarge(f"{key} is over {max_bytes:,} bytes; at most that many are read")
+    return body

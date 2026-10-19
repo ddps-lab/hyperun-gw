@@ -1528,3 +1528,70 @@ def test_a_job_without_a_pin_does_not_ask_for_the_schema(fake):
         raise AssertionError("the schema was fetched for a job that pins nothing")
     fake.schema = no_schema
     assert run(["submit", "--name", "x", "--image", "i"]) == cli.EXIT_OK
+
+
+# ------------------------------------------------------------ HYPERUN-SERVING-PLAN
+
+SERVING_FLAGS = ["--serving-model", "llama-3.1-8b", "--avg-input-tokens", "763",
+                 "--avg-output-tokens", "232", "--target-rps", "2.0", "--hourly-budget", "20.8333"]
+
+
+def test_the_serving_flags_build_the_servers_serving_plan_block():
+    body = cli.build_submit_body(args_for(["submit", "--name", "x", "--image", "i"]
+                                          + SERVING_FLAGS))
+    assert body["serving_plan"] == {"model": "llama-3.1-8b", "avg_input_tokens": 763,
+                                    "avg_output_tokens": 232, "target_rps": 2.0,
+                                    "hourly_budget": 20.8333}
+    # Nothing else is invented here: the server fills capacity type and region.
+    assert "capacity_type" not in body and "regions" not in body
+
+
+def test_a_flag_overrides_one_field_of_the_files_serving_plan(tmp_path):
+    job = tmp_path / "serve.yaml"
+    job.write_text("name: serve\nimage: vllm/vllm-openai:v0.10.0\nserving_plan:\n"
+                   "  model: llama-3.1-70b\n  avg_input_tokens: 763\n  avg_output_tokens: 232\n"
+                   "  target_rps: 2.0\n  hourly_budget: 20.8333\n")
+    body = cli.build_submit_body(args_for(["submit", "-f", str(job), "--target-rps", "4.67"]))
+    assert body["serving_plan"]["target_rps"] == 4.67
+    assert body["serving_plan"]["model"] == "llama-3.1-70b"
+    assert body["serving_plan"]["hourly_budget"] == 20.8333
+
+
+def test_a_job_without_serving_flags_sends_no_serving_plan():
+    body = cli.build_submit_body(args_for(["submit", "--name", "x", "--image", "i"]))
+    assert "serving_plan" not in body
+
+
+@pytest.mark.parametrize("command", ["submit", "validate", "estimate"])
+def test_a_server_that_does_not_know_serving_plan_is_never_sent_one(fake, capsys, command):
+    # That server would drop the block and run the image as an ordinary job.
+    fake.schema = lambda: {"properties": {"name": {}, "image": {}, "instance_type": {}}}
+    sent = []
+    fake.validate = fake.estimate = lambda body: sent.append(body)
+    assert run([command, "--name", "x", "--image", "i"] + SERVING_FLAGS) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "does not know serving_plan" in err and "--serving-model" in err
+    assert fake.submitted is None and sent == []
+
+
+def test_status_names_the_rented_plan_and_the_cheapest_ranked_one(fake, capsys):
+    fake.status_result = {
+        "job_id": "job-a8acdef80a07", "name": "serve", "phase": "Running",
+        "serving_plan_chosen": {"rank": 3, "instance_type": "excesssupply_A100_sxm4_80Gx8_2",
+                                "cloud": "excesssupply", "region": "omaha-usa-2",
+                                "cost_per_hour": "10.8000", "throughput_rps": "12.283",
+                                "latency_seconds": "2.042", "attempt": 2},
+        "serving_plans": [{"rank": 1, "cost_per_hour": "8.0700", "throughput_rps": "2.488",
+                           "nodes": 5, "pipelines": []}],
+    }
+    assert run(["status", "job-a8acdef80a07"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert ("serving    plan 3: excesssupply_A100_sxm4_80Gx8_2 (excesssupply / omaha-usa-2), "
+            "$10.8000/h, estimated 12.283 req/s, attempt 2") in out
+    assert "1 ranked; the cheapest is $8.0700/h for 2.488 req/s on 5 machine(s)" in out
+
+
+def test_status_of_an_ordinary_job_says_nothing_about_serving(fake, capsys):
+    assert run(["status", "job-a8acdef80a07"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "serving" not in out and "plans" not in out

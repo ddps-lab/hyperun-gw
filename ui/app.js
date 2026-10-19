@@ -562,6 +562,7 @@ let logText = "";
 let logTruncated = false;
 let lastSpec = null;  // what "Run again" copies from.
 let detailNs = "";    // which namespace the open detail screen reads. "" = own.
+let detailJob = null; // the last job answer drawn, so the spec's late arrival can redraw it.
 
 /* The ?namespace= suffix every detail request carries when an operator opened
    a foreign job. One helper rather than five string concatenations, because
@@ -604,6 +605,11 @@ async function drawDetail(jobId, ns = "") {
   $("d-gpu-panel").hidden = true;
   $("d-learning-panel").hidden = true;
   $("d-progress-panel").hidden = true;
+  // HYPERUN-SERVING-PLAN, the same rule for the two serving panels: each is drawn from THIS
+  // job's answer or stays hidden, never left showing the previous job's plans or measurements.
+  $("d-serving-panel").hidden = true;
+  $("d-servecheck-panel").hidden = true;
+  detailJob = null;
 
   // The spec panel's summary says which image this job ran, so a folded panel
   // still answers the question it is most often opened for.
@@ -630,6 +636,9 @@ async function drawDetail(jobId, ns = "") {
       ? note("info", `${spec.redacted.join(", ")} came from a Kubernetes Secret. ` +
              `Neither the value nor the Secret's name ever reaches this page.`)
       : "";
+    // HYPERUN-SERVING-PLAN. The ask lives in the spec, and a finished job's poll may already
+    // have run and stopped before this answer arrived, so the panel is drawn again from here.
+    if (detailJob) drawServingPlan(detailJob);
   }).catch((err) => { $("d-spec").textContent = err.message; });
 
   poll.every(5, async () => {
@@ -679,6 +688,7 @@ async function drawDetail(jobId, ns = "") {
     ].join("");
 
     drawCompare(job);
+    drawServingPlan(job);
     drawStopButton(jobId, job);
     drawTerminal(jobId, job);
     // After the panels know whether they have anything, and before the reader
@@ -969,6 +979,10 @@ async function drawArtifacts(jobId) {
     $("d-files").innerHTML = note("err", err.message);
     return;
   }
+  // HYPERUN-SERVING-CHECK. Only a listing that carries the result file costs the extra request.
+  // Hidden otherwise, which also hides a check drawn before Refresh found it gone.
+  if (a.files.some((f) => f.name === SERVING_CHECK_FILE)) drawServingCheck(jobId);
+  else $("d-servecheck-panel").hidden = true;
   if (!a.files.length) {
     $("d-files").innerHTML = `<p class="dim">${esc(a.note || "No files.")}</p>`;
     return;
@@ -1460,6 +1474,192 @@ function drawCompare(job) {
       : `Nothing was rented and the workload did not run. ${c.raw}`);
 }
 
+/* HYPERUN-SERVING-PLAN. The Serving plan panel: the planner's ranked rental plans for a job that
+   sent `serving_plan`, and the one the operator rented.
+
+   END-TO-END FLOW of what reaches this panel:
+     1. The job was submitted with `serving_plan` (readForm), which the gateway wrote as
+        PACSrun's spec.placement.servingPlan with regions [shadeform].
+     2. PACSrun's planner ranked up to 50 plans, cheapest per hour first, and wrote them to
+        status.servingPlans; outside compare mode it rented the cheapest plan that runs on one
+        machine and wrote that to status.servingPlanChosen, with the attempt it is on.
+     3. GET /v1/jobs/{id} returns both as `serving_plans` and `serving_plan_chosen`, money and
+        rates as the decimal strings PACSrun wrote. This panel prints them as they are.
+
+   ONE ROW PER PIPELINE, NOT PER PLAN. A plan is one or more pipelines, each a copy of the model
+   whose layers are split in order across machines of one domain; rank 1 of the 2026-10-19
+   snapshot is two pipelines on five machines. The plan's own numbers (rank, req/s, $/h,
+   latency, executable) span its pipeline rows, and each pipeline row names its domain and its
+   machines with the layers and TP each one holds. */
+function servingPlanHtml(job, asked) {
+  const plans = job.serving_plans || [];
+  const chosen = job.serving_plan_chosen || null;
+  const parts = [];
+  if (job.placement_mode === "compare") {
+    parts.push(note("info", "Compare mode: these plans were priced and nothing was rented."));
+  }
+  if (asked) {
+    parts.push(`<p class="dim small">Asked for ${esc(asked.model)}, ` +
+      `${esc(asked.avgInputTokens)} tokens in and ${esc(asked.avgOutputTokens)} out, ` +
+      `${esc(asked.targetRPS)} req/s within $${esc(asked.hourlyBudget)}/h.</p>`);
+  }
+  if (chosen) {
+    parts.push(`<div class="facts">` + [
+      fact("Rented plan", `rank ${chosen.rank}, attempt ${chosen.attempt}`),
+      fact("VM", chosen.instance_type),
+      fact("Where", `${chosen.cloud} / ${chosen.region}`),
+      fact("Price", `$${chosen.cost_per_hour}/h`),
+      fact("Estimated", `${chosen.throughput_rps} req/s, ` +
+        (chosen.latency_seconds != null ? `${chosen.latency_seconds} s` : "latency -")),
+    ].join("") + `</div>`);
+  }
+  if (!plans.length) {
+    // The 74 to 92 s is PACSrun's own measurement of one planner run (pkg/decider/shuntserve,
+    // run against its 300 s timeout), so "still working" has a size.
+    parts.push(`<p class="dim">${esc(TERMINAL.includes(job.phase)
+      ? "No plan came back. The job's message says why."
+      : "The planner has not answered yet. One run took 74 to 92 s in PACSrun's own tests.")}</p>`);
+    return { summary: "no plans yet", html: parts.join("") };
+  }
+
+  const rows = plans.map((p) => {
+    const isChosen = Boolean(chosen) && chosen.rank === p.rank;
+    const pipes = (p.pipelines && p.pipelines.length) ? p.pipelines : [{ domain: "", stages: [] }];
+    const span = pipes.length > 1 ? ` rowspan="${pipes.length}"` : "";
+    const executable = p.executable === true ? "yes" : p.executable === false ? "no" : "-";
+    return pipes.map((q, i) => {
+      const machines = (q.stages || []).map((s) =>
+        `${esc(s.instance_type)} <span class="dim">${esc(s.layers)} layers, TP ${esc(s.tp)}</span>`
+      ).join("<br>");
+      // A pipeline's own share only when there is more than one; alone it IS the plan's.
+      const share = pipes.length > 1
+        ? `<div class="dim tiny">${esc(q.throughput_rps)} req/s, $${esc(q.cost_per_hour)}/h</div>`
+        : "";
+      const head = i > 0 ? "" :
+        `<td class="num span-top"${span}>${esc(p.rank)}` +
+        (isChosen ? `<div class="tiny"><b>chosen</b>, attempt ${esc(chosen.attempt)}</div>` : "") +
+        `</td>`;
+      const tail = i > 0 ? "" :
+        `<td class="num span-top"${span}>${esc(p.throughput_rps ?? "-")}</td>` +
+        `<td class="num span-top"${span}>${p.cost_per_hour != null ? "$" + esc(p.cost_per_hour) : "-"}</td>` +
+        `<td class="num span-top"${span}>${p.latency_seconds != null ? esc(p.latency_seconds) + " s" : "-"}</td>` +
+        `<td class="span-top"${span}>${executable}</td>`;
+      return `<tr${isChosen ? ' class="chosen"' : ""}>${head}` +
+        `<td class="span-top">${esc(q.domain)}${share}</td><td>${machines}</td>${tail}</tr>`;
+    }).join("");
+  }).join("");
+
+  parts.push(`<div class="scroll"><table><thead><tr>` +
+    `<th>Rank</th><th>Domain</th><th>VM(s)</th><th>req/s</th><th>$/h</th><th>Latency</th>` +
+    `<th title="Runs on one machine, which is the only kind the operator can rent today">Executable</th>` +
+    `</tr></thead><tbody>${rows}</tbody></table></div>`);
+  const summary = `${plans.length} plan${plans.length === 1 ? "" : "s"}, cheapest ` +
+    `$${plans[0].cost_per_hour}/h` +
+    (chosen ? `, rented rank ${chosen.rank}` : job.placement_mode === "compare" ? ", nothing rented" : "");
+  return { summary, html: parts.join("") };
+}
+
+/* Show or hide the panel. Shown when the job has plans, a rented plan, or asked for one (the
+   spec says so), so a serving job whose planner is still working says that rather than nothing. */
+function drawServingPlan(job) {
+  detailJob = job;
+  const asked = lastSpec?.spec?.placement?.servingPlan || null;
+  const shown = Boolean((job.serving_plans || []).length || job.serving_plan_chosen || asked);
+  $("d-serving-panel").hidden = !shown;
+  if (!shown) return;
+  const view = servingPlanHtml(job, asked);
+  $("d-serving-note").textContent = view.summary;
+  $("d-serving").innerHTML = view.html;
+}
+
+/* HYPERUN-SERVING-CHECK. The Serving check panel: what a serving check job measured with vLLM
+   on the rented machine, next to what the planner estimated for that machine.
+
+   END-TO-END FLOW:
+     1. The job's script writes `serving-check-result.json` (schema hyperun.serving-check/v1)
+        and announces it with a HYPERUN_ARTIFACT= line; the driver copies it to the result path.
+     2. drawArtifacts sees the file in GET /v1/jobs/{id}/artifacts and calls drawServingCheck.
+     3. GET /v1/jobs/{id}/serving-check reads the file on the server (the browser may not read
+        S3 bytes: the results bucket allows no cross-origin read) and returns its JSON.
+     4. servingCheckHtml lays out `comparison`: each estimate beside its measurement and the
+        ratio the script computed. Nothing is computed here.
+
+   A VALUE THE JOB COULD NOT MEASURE IS null IN THE FILE, never 0, and is printed as "not
+   measured": a failed run must not read as a run that measured zero. */
+const SERVING_CHECK_FILE = "serving-check-result.json";
+
+function servingCheckHtml(answer) {
+  if (!answer || !answer.found || !answer.check) {
+    return { summary: "no result to show",
+             html: note("info", (answer && answer.note) || "No serving check result.") };
+  }
+  const c = answer.check;
+  const cmp = c.comparison || {};
+  const plan = c.plan || {};
+  const target = (c.runs || {}).target || null;
+  const shown = (x, unit) => (x === null || x === undefined) ? null : `${x}${unit}`;
+  const estimate = (x, unit) => shown(x, unit) ?? "-";
+  const measured = (x, unit) => shown(x, unit) ?? "not measured";
+  const parts = [];
+
+  if (c.status === "failed") {
+    parts.push(note("err", `The check failed in ${c.failed_phase || "an unnamed phase"}: ` +
+      `${c.message || "no reason written"}. What it measured before that is below.`));
+  }
+  const cards = (c.gpu && c.gpu.cards) || [];
+  parts.push(`<div class="facts">` + [
+    fact("Model", (c.model && c.model.id) || "-"),
+    fact("GPU", cards.length ? `${cards[0].name} × ${c.gpu.count}` : "-"),
+    fact("Plan", ([plan.cloud, plan.region].filter(Boolean).join(" / ") +
+      (plan.shade_instance_type ? ` ${plan.shade_instance_type}` : "") +
+      (plan.usd_per_hour != null ? `, $${plan.usd_per_hour}/h` : "")) || "-"),
+    fact("vLLM", (c.software && c.software.vllm_version) || "-"),
+  ].join("") + `</div>`);
+
+  const sustained = cmp.target_rate_sustained === true ? "held"
+    : cmp.target_rate_sustained === false ? "not held" : "not measured";
+  const rows = [
+    ["Throughput at full load", estimate(cmp.max_rps_planned, " req/s"),
+      measured(cmp.max_rps_measured, " req/s"), estimate(cmp.max_rps_ratio, "")],
+    ["Latency of one request alone", estimate(cmp.single_latency_s_planned, " s"),
+      measured(cmp.single_latency_s_measured, " s"), estimate(cmp.single_latency_ratio, "")],
+    ["Target rate", estimate((c.workload || {}).target_rate_rps, " req/s"),
+      (target && target.request_throughput_rps != null
+        ? `${target.request_throughput_rps} req/s, ${sustained}` : sustained), "-"],
+  ];
+  parts.push(`<div class="scroll"><table><thead><tr>` +
+    `<th></th><th>Planner estimate</th><th>Measured</th><th>Measured / estimate</th>` +
+    `</tr></thead><tbody>` +
+    rows.map(([k, e, m, r]) =>
+      `<tr><td>${esc(k)}</td><td class="num">${esc(e)}</td>` +
+      `<td class="num">${esc(m)}</td><td class="num">${esc(r)}</td></tr>`).join("") +
+    `</tbody></table></div>`);
+  if (c.written_at) {
+    parts.push(`<p class="dim tiny">Written ${esc(when(c.written_at))} by the job's script, ` +
+      `${esc(answer.name)}.</p>`);
+  }
+  const summary = c.status === "failed" ? `failed in ${c.failed_phase || "?"}`
+    : (cmp.max_rps_measured != null
+      ? `measured ${cmp.max_rps_measured} req/s against ${estimate(cmp.max_rps_planned, "")} estimated`
+      : "nothing measured");
+  return { summary, html: parts.join("") };
+}
+
+async function drawServingCheck(jobId) {
+  let answer;
+  try {
+    answer = await call(`/v1/jobs/${jobId}/serving-check` + nsQuery());
+  } catch (err) {
+    answer = { found: false, note: err.message };
+  }
+  // The reader may have opened another job while this was in flight; its answer is not theirs.
+  if ($("d-id").textContent !== jobId) return;
+  const view = servingCheckHtml(answer);
+  $("d-servecheck-note").textContent = view.summary;
+  $("d-servecheck").innerHTML = view.html;
+  $("d-servecheck-panel").hidden = false;
+}
+
 /* ------------------------------------------------------------ 3b. Scripts */
 
 /* HYPERUN-SCRIPTS. Every run.sh in one namespace, GROUPED BY THE PERSON WHO RAN IT.
@@ -1766,6 +1966,25 @@ function readForm() {
   if (num("f-rowtokens")) t.row_tokens = num("f-rowtokens");
   if (num("f-cap")) t.cap = num("f-cap");
   if (num("f-batch")) t.batch_size = num("f-batch");
+
+  /* HYPERUN-SERVING-PLAN. The model box is the switch: empty sends no block at all. An empty
+     number box goes out as null rather than being left out or defaulted, so /v1/validate names
+     the missing field (serving-plan-tokens and the rest) instead of this screen guessing a
+     value; the placeholders are examples, not defaults. The two rates are decimals, read with
+     parseFloat, because 2.5 req/s and $20.8333/h are ordinary asks. */
+  if ($("f-serve-model").value) {
+    const dec = (id) => {
+      const v = parseFloat($(id).value);
+      return Number.isFinite(v) ? v : null;
+    };
+    body.serving_plan = {
+      model: $("f-serve-model").value,
+      avg_input_tokens: num("f-serve-in"),
+      avg_output_tokens: num("f-serve-out"),
+      target_rps: dec("f-serve-rps"),
+      hourly_budget: dec("f-serve-budget"),
+    };
+  }
 
   return body;
 }
@@ -2117,7 +2336,9 @@ $("s1-reset").onclick = () => {
   // longer exists throws on $(id).value, which would have left every field after
   // it uncleared.
   ["f-name", "f-image", "f-command", "f-env",
-   "f-pairs", "f-epochs", "f-rowtokens", "f-cap", "f-batch"].forEach((id) => { $(id).value = ""; });
+   "f-pairs", "f-epochs", "f-rowtokens", "f-cap", "f-batch",
+   "f-serve-model", "f-serve-in", "f-serve-out", "f-serve-rps", "f-serve-budget",
+  ].forEach((id) => { $(id).value = ""; });
   $("f-command-note").innerHTML = "";
   $("f-gpucount").value = 1;
   $("f-parallelism").value = 1;
@@ -2131,7 +2352,9 @@ $("s1-reset").onclick = () => {
   // put the next submission back on `ordered` without saying so.
   $("f-mode").value = "cheapest";
   document.querySelectorAll("#view-submit [data-vendor]").forEach((b) => { b.checked = false; });
-  vendorRules();
+  // HYPERUN-SERVING-PLAN. The model box is now empty, so this gives back the boxes a serving
+  // plan disabled, and runs vendorRules as well.
+  servingRules();
   $("s1-err").innerHTML = "";
 };
 
@@ -2167,9 +2390,61 @@ function vendorRules() {
   }
 }
 
+/* HYPERUN-SERVING-PLAN. What choosing a model does to the rest of the form, and the one line
+   that says which of the two things this job will do.
+
+   FORCED, LIKE vendorRules ABOVE, AND FOR THE SAME REASON: a box whose only outcome is a refusal
+   should not be offered. PACSrun plans a serving plan only on-demand (Shadeform sells nothing
+   else) and only for regions [shadeform] (validateServingPlan), and the planner picks the GPUs,
+   so spot, a vendor box, a region or a GPU is refused or ignored by the server
+   (check_serving_plan). Capacity is set to on-demand with spot disabled; the vendor boxes, the
+   regions and the GPU are emptied and disabled. Clearing the model gives them all back.
+
+   THE MODE IS LEFT ALONE, because it decides whether money is spent and that is the person's
+   call: compare ranks the plans and rents nothing, any other mode rents the cheapest plan that
+   runs on one machine. The note says which, and this runs on every mode change to keep it true.
+
+   It calls vendorRules, so it is also the mode select's handler. */
+function servingRules() {
+  const on = Boolean($("f-serve-model").value);
+  const capacity = $("f-capacity");
+  if (on) capacity.value = "on-demand";
+  Array.from(capacity.options).forEach((o) => { o.disabled = on && o.value !== "on-demand"; });
+  document.querySelectorAll("#view-submit [data-vendor]").forEach((b) => {
+    if (on) b.checked = false;
+    b.disabled = on;
+  });
+  ["f-regions", "f-gpu"].forEach((id) => {
+    if (on) $(id).value = "";
+    $(id).disabled = on;
+  });
+  vendorRules();
+
+  // Folded, the section still sends what is in it, so its summary says so.
+  const summary = $("f-serving")?.querySelector(".acc-note");
+  if (summary) {
+    summary.textContent = on
+      ? `${$("f-serve-model").value}, sent with this job`
+      : "optional: which Shadeform machines serve a model at your request rate";
+  }
+  if (!on) {
+    $("f-serve-note").innerHTML = "";
+    return;
+  }
+  const compare = $("f-mode").value === "compare";
+  $("f-serve-note").innerHTML = note("info",
+    "Capacity is on-demand and the planner picks Shadeform machines, so vendors, regions and " +
+    "GPU are set aside. " + (compare
+      ? "Placement is compare: the planner ranks up to 50 plans and nothing is rented."
+      : `Placement is ${$("f-mode").value || "ordered"}: the operator rents the cheapest plan ` +
+        "that runs on one machine and runs this image there, billed by the hour. Choose " +
+        "compare under Placement to see the plans first."));
+}
+
 document.querySelectorAll("#view-submit [data-vendor]")
   .forEach((b) => { b.onchange = vendorRules; });
-$("f-mode").onchange = vendorRules;
+$("f-mode").onchange = servingRules;
+$("f-serve-model").onchange = servingRules;
 
 $("s2-back").onclick = () => step(1);
 $("s3-back").onclick = () => step(2);
@@ -2589,6 +2864,16 @@ $("d-again").onclick = () => {
   // design. Carry the name across with an empty value and let the user fill it.
   $("f-env").value = (sp.env || [])
     .map((x) => x.fromSecret ? `${x.name}=` : `${x.name}=${x.value ?? ""}`).join("\n");
+
+  // HYPERUN-SERVING-PLAN. The operator's camelCase block back into the five boxes, then the
+  // same rules a model chosen by hand applies. A job without one clears them.
+  const serving = pl.servingPlan || {};
+  $("f-serve-model").value = serving.model || "";
+  $("f-serve-in").value = serving.avgInputTokens ?? "";
+  $("f-serve-out").value = serving.avgOutputTokens ?? "";
+  $("f-serve-rps").value = serving.targetRPS ?? "";
+  $("f-serve-budget").value = serving.hourlyBudget ?? "";
+  servingRules();
   step(1);
   go("submit");
 };
@@ -2636,6 +2921,10 @@ function drawOpenState(jobId, job) {
   const open = (id, on) => { const el = $(id); if (el) el.open = on; };
 
   open("d-compare-panel", phase === "Compared");
+  // Open whenever they are shown: each is hidden for a job it has nothing to say about, and for
+  // a serving job each is the answer the page was opened for (HYPERUN-SERVING-PLAN).
+  open("d-serving-panel", true);
+  open("d-servecheck-panel", true);
   open("d-progress-panel", running);
   open("d-gpu-panel", running);
   open("d-learning-panel", running);

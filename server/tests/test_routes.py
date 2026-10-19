@@ -267,13 +267,21 @@ def test_secret_names_need_a_token(client):
 
 
 class FakeS3:
-    """Answers list_objects_v2 from a fixed list and mints fake signed URLs."""
+    """Answers list_objects_v2 from a fixed list and mints fake signed URLs.
 
-    def __init__(self, contents=None, truncated=False, refuse=None):
+    HYPERUN-SERVING-CHECK-ROUTE: `objects` (key -> bytes) answers get_object. A key that is
+    not there raises what botocore raises, an exception whose `response["Error"]["Code"]` is
+    "NoSuchKey" -- the shape artifacts.read_small_object reads, so the double takes the same
+    branch the real client does.
+    """
+
+    def __init__(self, contents=None, truncated=False, refuse=None, objects=None):
         self.contents = contents or []
         self.truncated = truncated
         self.refuse = refuse
+        self.objects = objects or {}
         self.listed: list[tuple[str, str]] = []
+        self.got: list[tuple[str, str]] = []
 
     def list_objects_v2(self, Bucket, Prefix, MaxKeys):
         if self.refuse is not None:
@@ -283,6 +291,22 @@ class FakeS3:
 
     def generate_presigned_url(self, operation, Params, ExpiresIn):
         return f"https://signed.example/{Params['Bucket']}/{Params['Key']}?ttl={ExpiresIn}"
+
+    def get_object(self, Bucket, Key):
+        if self.refuse is not None:
+            raise self.refuse
+        self.got.append((Bucket, Key))
+        if Key not in self.objects:
+            missing = RuntimeError("An error occurred (NoSuchKey) when calling GetObject")
+            missing.response = {"Error": {"Code": "NoSuchKey"}}
+            raise missing
+        data = self.objects[Key]
+
+        class Body:
+            def read(self, amount=-1):
+                return data if amount < 0 else data[:amount]
+
+        return {"ContentLength": len(data), "Body": Body()}
 
 
 # ---------------------------------------------------------------- images
@@ -2651,3 +2675,191 @@ def test_the_old_a100_name_is_priced_as_the_a100_40gb_it_is_submitted_as(client)
     answer = as_alice(client, "POST", "/v1/validate", json=body).json()
     assert "gpu-name-renamed" in {f["code"] for f in answer["findings"]}
 
+
+
+# ---------------------------------------------------------------- HYPERUN-SERVING-PLAN
+
+SERVING_ASK = {"model": "llama-3.1-8b", "avg_input_tokens": 763, "avg_output_tokens": 232,
+               "target_rps": 2.0, "hourly_budget": 20.8333}
+
+
+def test_a_serving_plan_needs_no_capacity_type_and_reaches_the_object(client, cluster):
+    """The one submit that may leave capacity_type out: Shadeform sells on demand only, so
+    there is nothing for the caller to decide."""
+    body = {"name": "serve-8b", "image": "vllm/vllm-openai:v0.10.0",
+            "serving_plan": SERVING_ASK, "placement_mode": "compare"}
+    response = as_alice(client, "POST", "/v1/jobs", json=body)
+    assert response.status_code == 201, response.text
+    placement = cluster.created[0][1]["spec"]["placement"]
+    assert placement["servingPlan"]["targetRPS"] == "2.0"
+    assert placement["servingPlan"]["hourlyBudget"] == "20.8333"
+    assert (placement["capacityType"], placement["regions"], placement["mode"]) == \
+        ("on-demand", ["shadeform"], "compare")
+
+
+def test_a_bad_serving_plan_is_refused_with_validates_words_and_nothing_is_created(
+        client, cluster):
+    body = submit_body(serving_plan={**SERVING_ASK, "target_rps": 0, "model": "gpt-4"})
+    response = as_alice(client, "POST", "/v1/jobs", json=body)
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "[serving-plan-model]" in detail and "[serving-plan-target-rps]" in detail
+    assert cluster.created == []
+
+
+def test_a_serving_plan_on_spot_is_refused_before_a_job_exists(client, cluster):
+    body = submit_body(serving_plan=SERVING_ASK, capacity_type="spot")
+    response = as_alice(client, "POST", "/v1/jobs", json=body)
+    assert response.status_code == 400
+    assert "[serving-plan-capacity]" in response.json()["detail"]
+    assert cluster.created == []
+
+
+def test_validate_answers_a_missing_value_as_a_finding_not_a_422(client):
+    response = as_alice(client, "POST", "/v1/validate",
+                        json=submit_body(serving_plan={"model": "llama-3.1-70b"}))
+    assert response.status_code == 200
+    answer = response.json()
+    assert answer["ok"] is False
+    codes = {f["code"] for f in answer["findings"] if f["level"] == "error"}
+    assert codes == {"serving-plan-tokens", "serving-plan-target-rps",
+                     "serving-plan-hourly-budget"}
+
+
+def test_the_estimate_says_its_figures_do_not_price_a_serving_plan(client):
+    answer = as_alice(client, "POST", "/v1/estimate",
+                      json=submit_body(serving_plan=SERVING_ASK)).json()
+    assert main.SERVING_ESTIMATE_NOTE in answer["warnings"]
+    plain = as_alice(client, "POST", "/v1/estimate", json=submit_body()).json()
+    assert main.SERVING_ESTIMATE_NOTE not in plain["warnings"]
+
+
+def test_the_schema_offers_the_serving_plan(client):
+    properties = client.get("/v1/schema").json()["properties"]
+    assert "serving_plan" in properties
+
+
+def _serving_job(cluster):
+    """A rented serving job, its status shaped as the operator writes it."""
+    cluster.objects[("lab-alice", OBJECT_NAME)] = {
+        "metadata": {"name": OBJECT_NAME,
+                     "labels": {naming.JOB_ID_LABEL: JOB_ID, naming.OWNER_LABEL: "alice"},
+                     "creationTimestamp": "2026-10-19T00:00:00Z"},
+        "spec": {"placement": {"capacityType": "on-demand", "regions": ["shadeform"]}},
+        "status": {
+            "phase": "Running",
+            "servingPlans": [{
+                "rank": 1, "priceBasis": "on_demand", "costPerHour": "1.3500",
+                "throughputRPS": "16.953", "latencySeconds": "1.760", "nodes": 1,
+                "executable": True,
+                "pipelines": [{"domain": "hyperstack/montreal-canada-2",
+                               "throughputRPS": "16.953", "costPerHour": "1.3500",
+                               "stages": [{"instanceType": "hyperstack_A100_80G",
+                                           "zone": "montreal-canada-2", "layers": 32,
+                                           "tp": 1, "pricePerHour": "1.3500"}]}],
+            }],
+            "servingPlanChosen": {"rank": 1, "instanceType": "hyperstack_A100_80G",
+                                  "cloud": "hyperstack", "region": "montreal-canada-2",
+                                  "costPerHour": "1.3500", "throughputRPS": "16.953",
+                                  "latencySeconds": "1.760", "attempt": 1},
+        },
+    }
+
+
+def test_the_job_carries_its_plans_and_the_one_rented(client, cluster):
+    _serving_job(cluster)
+    view = as_alice(client, "GET", f"/v1/jobs/{JOB_ID}").json()
+    assert view["serving_plans"][0]["pipelines"][0]["stages"][0]["layers"] == 32
+    assert view["serving_plans"][0]["executable"] is True
+    assert view["serving_plan_chosen"]["instance_type"] == "hyperstack_A100_80G"
+    assert view["serving_plan_chosen"]["attempt"] == 1
+
+
+def test_the_job_list_leaves_the_plans_out_and_keeps_the_choice(client, cluster):
+    """Up to 50 plans per job, polled every 15 s: the list draws none of them."""
+    _serving_job(cluster)
+    row = as_alice(client, "GET", "/v1/jobs").json()["jobs"][0]
+    assert "serving_plans" not in row
+    assert row["serving_plan_chosen"]["rank"] == 1
+
+
+# ---------------------------------------------------------- HYPERUN-SERVING-CHECK-ROUTE
+
+PREFIX = "hyperun/lab-alice/serve-8b/"
+CHECK_KEY = PREFIX + "serving-check-result.json"
+
+
+def _check_document(**overrides):
+    document = {"schema": "hyperun.serving-check/v1", "status": "ok",
+                "comparison": {"max_rps_measured": 14.2, "max_rps_planned": 16.953}}
+    document.update(overrides)
+    return json.dumps(document).encode()
+
+
+def test_the_serving_check_comes_back_whole(client, cluster, monkeypatch):
+    seed_job_with_result_path(cluster, "lab-alice", OBJECT_NAME,
+                              f"s3://<RESULT_BUCKET>/{PREFIX}")
+    fake = FakeS3(objects={CHECK_KEY: _check_document()})
+    monkeypatch.setattr(main.artifacts, "s3_client", lambda: fake)
+    answer = as_alice(client, "GET", f"/v1/jobs/{JOB_ID}/serving-check").json()
+    assert answer["found"] is True
+    assert answer["name"] == "serving-check-result.json"
+    assert answer["check"]["comparison"]["max_rps_measured"] == 14.2
+    # One GET of exactly the job's own key: the prefix comes off the job object.
+    assert fake.got == [("<RESULT_BUCKET>", CHECK_KEY)]
+
+
+def test_a_check_not_uploaded_yet_is_a_note_not_an_error(client, cluster, monkeypatch):
+    seed_job_with_result_path(cluster, "lab-alice", OBJECT_NAME,
+                              f"s3://<RESULT_BUCKET>/{PREFIX}")
+    monkeypatch.setattr(main.artifacts, "s3_client", lambda: FakeS3())
+    response = as_alice(client, "GET", f"/v1/jobs/{JOB_ID}/serving-check")
+    assert response.status_code == 200
+    assert response.json()["found"] is False
+    assert "not in this job's result path" in response.json()["note"]
+
+
+def test_a_file_with_another_schema_is_not_read_as_a_check(client, cluster, monkeypatch):
+    seed_job_with_result_path(cluster, "lab-alice", OBJECT_NAME,
+                              f"s3://<RESULT_BUCKET>/{PREFIX}")
+    fake = FakeS3(objects={CHECK_KEY: _check_document(schema="something/v2")})
+    monkeypatch.setattr(main.artifacts, "s3_client", lambda: fake)
+    answer = as_alice(client, "GET", f"/v1/jobs/{JOB_ID}/serving-check").json()
+    assert answer["found"] is False and answer["check"] is None
+    assert "'something/v2'" in answer["note"]
+
+
+def test_a_file_too_big_is_refused_before_its_body_is_read(client, cluster, monkeypatch):
+    seed_job_with_result_path(cluster, "lab-alice", OBJECT_NAME,
+                              f"s3://<RESULT_BUCKET>/{PREFIX}")
+    big = b" " * (main.artifacts.SERVING_CHECK_MAX_BYTES + 1)
+    monkeypatch.setattr(main.artifacts, "s3_client", lambda: FakeS3(objects={CHECK_KEY: big}))
+    answer = as_alice(client, "GET", f"/v1/jobs/{JOB_ID}/serving-check").json()
+    assert answer["found"] is False and "at most" in answer["note"]
+
+
+def test_the_serving_check_refuses_a_foreign_bucket_before_any_s3_call(
+        client, cluster, monkeypatch):
+    seed_job_with_result_path(cluster, "lab-alice", OBJECT_NAME,
+                              "s3://somebody-elses-bucket/loot/")
+    fake = FakeS3(objects={"loot/serving-check-result.json": _check_document()})
+    monkeypatch.setattr(main.artifacts, "s3_client", lambda: fake)
+    answer = as_alice(client, "GET", f"/v1/jobs/{JOB_ID}/serving-check").json()
+    assert answer["found"] is False and "outside" in answer["note"]
+    assert fake.got == []
+
+
+def test_the_serving_check_turns_an_s3_refusal_into_502(client, cluster, monkeypatch):
+    seed_job_with_result_path(cluster, "lab-alice", OBJECT_NAME,
+                              f"s3://<RESULT_BUCKET>/{PREFIX}")
+    monkeypatch.setattr(main.artifacts, "s3_client", lambda: FakeS3(
+        refuse=RuntimeError("AccessDenied: nobody granted GetObject")))
+    response = as_alice(client, "GET", f"/v1/jobs/{JOB_ID}/serving-check")
+    assert response.status_code == 502
+    assert "GetObject" in response.json()["detail"]
+
+
+def test_another_users_serving_check_reads_as_absent(client, cluster):
+    response = client.get(f"/v1/jobs/{JOB_ID}/serving-check",
+                          headers={"Authorization": "Bearer bob-token"})
+    assert response.status_code == 404

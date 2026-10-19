@@ -333,6 +333,33 @@
     </div>
   </details>
 
+  <!-- HYPERUN-SERVING-PLAN. The planner's ranked rental plans for a job that sent a serving
+       plan: one row per pipeline, the plan's own numbers spanning its pipelines, and the plan
+       the operator rented marked with its attempt. Drawn by drawServingPlan from the job's
+       `serving_plans` and `serving_plan_chosen`; hidden for every other job. -->
+  <details class="acc" id="d-serving-panel" hidden open>
+    <summary>
+      <span class="acc-title">Serving plan</span>
+      <span class="acc-note" id="d-serving-note"></span>
+      <span class="spacer"></span>
+    </summary>
+    <div class="acc-body" id="d-serving"></div>
+  </details>
+
+  <!-- HYPERUN-SERVING-CHECK. What vLLM measured on the rented machine next to what the planner
+       estimated, read from the job's `serving-check-result.json` (schema
+       hyperun.serving-check/v1). Drawn by drawServingCheck only when Result files lists that
+       file, through GET /v1/jobs/{id}/serving-check: the browser cannot read the file from S3
+       itself, because the results bucket allows no cross-origin read. -->
+  <details class="acc" id="d-servecheck-panel" hidden open>
+    <summary>
+      <span class="acc-title">Serving check</span>
+      <span class="acc-note" id="d-servecheck-note"></span>
+      <span class="spacer"></span>
+    </summary>
+    <div class="acc-body" id="d-servecheck"></div>
+  </details>
+
   <details class="acc" id="d-progress-panel" hidden open>
     <summary>
       <span class="acc-title">Progress</span>
@@ -725,6 +752,47 @@
                  placeholder="aws/us-east-1, aws/ap-northeast-2">
           <datalist id="f-region-list"></datalist>
           <div id="f-regions-note"></div></label>
+      </div>
+    </details>
+
+    <!-- HYPERUN-SERVING-PLAN. Ask the ShuntServe planner how to serve a model instead of naming a
+         GPU. The five boxes are the request's `serving_plan` block, one box per field, and the
+         model box is the switch: empty sends no block at all, which is every job before this
+         section existed.
+         WHAT CHOOSING A MODEL CHANGES ELSEWHERE ON THIS FORM, and why it is forced rather than
+         left to a refusal. PACSrun plans a serving plan only on-demand and only for the
+         placement word shadeform, and the planner picks the GPUs itself, so a spot box, a vendor
+         box, a region or a GPU would each be refused or ignored. servingRules() sets capacity to
+         on-demand, clears and disables the vendor boxes, the regions and the GPU, and says so in
+         the note below. Placement mode is NOT changed: compare ranks the plans and rents
+         nothing, any other mode rents the cheapest plan that runs on one machine, and the note
+         says which of the two this form will do.
+         FOLDED, IT STILL SENDS WHAT IS IN IT, so the summary says so (the HYPERUN-TRAINING-SIZE
+         rule). -->
+    <details class="acc" id="f-serving">
+      <summary>
+        <span class="acc-title">Serving plan</span>
+        <span class="acc-note">optional: which Shadeform machines serve a model at your request rate</span>
+        <span class="spacer"></span>
+      </summary>
+      <div class="acc-body">
+        <label><span><b>Model</b> <span class="dim">the planner's two presets</span></span>
+          <select id="f-serve-model">
+            <option value="" selected>No serving plan</option>
+            <option value="llama-3.1-8b">llama-3.1-8b (Llama 3.1 8B)</option>
+            <option value="llama-3.1-70b">llama-3.1-70b (Llama 3.1 70B)</option>
+          </select></label>
+        <div class="grid2">
+          <label><span><b>Average input</b> <span class="dim">tokens per prompt</span></span>
+            <input id="f-serve-in" type="number" min="1" step="1" placeholder="763"></label>
+          <label><span><b>Average output</b> <span class="dim">tokens per answer</span></span>
+            <input id="f-serve-out" type="number" min="1" step="1" placeholder="232"></label>
+          <label><span><b>Target rate</b> <span class="dim">requests per second</span></span>
+            <input id="f-serve-rps" type="number" min="0" step="any" placeholder="2.0"></label>
+          <label><span><b>Hourly budget</b> <span class="dim">$/h for all machines together</span></span>
+            <input id="f-serve-budget" type="number" min="0" step="any" placeholder="20.00"></label>
+        </div>
+        <div id="f-serve-note"></div>
       </div>
     </details>
 

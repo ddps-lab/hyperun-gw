@@ -77,6 +77,18 @@ GPUS
   Sizes as the vendor prints them on the card: 24 an L4, 48 an L40S, 80 an H100.
   Omit "gpu" entirely for a job that needs no GPU.
 
+SERVING A MODEL
+  Instead of "gpu", send "serving_plan": {"model": "llama-3.1-8b" or
+  "llama-3.1-70b", "avg_input_tokens", "avg_output_tokens", "target_rps",
+  "hourly_budget"}. The budget is US dollars PER HOUR for all of a plan's
+  machines together; there is no total budget and no duration. The ShuntServe
+  planner ranks up to 50 Shadeform plans, cheapest per hour first, and
+  GET /v1/jobs/{id} returns them as "serving_plans". With placement_mode
+  "compare" nothing is rented. Otherwise the cheapest plan that runs on one
+  machine is rented, your image runs there, and "serving_plan_chosen" says which.
+  Leave capacity_type, vendors, regions and gpu out: a plan runs on-demand on
+  shadeform, and /v1/validate refuses anything else by name.
+
 PHASES
   Pending     accepted, nothing bought yet
   Starting    a machine is being obtained and the container is coming up

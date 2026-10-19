@@ -185,6 +185,11 @@ jobs:
       # 요청하지 않은 job 에는 GPU 줄이 없어야 한다(HYPERUN-INSTANCE-AND-GPU).
       - name: job 화면의 Instance 와 GPU
         run: node ui/job_machine_test.js
+      # HYPERUN-SERVING-PLAN. The serving_plan block the New job screen sends, the boxes a
+      # serving plan forces, the ranked-plan table drawn from fixture data, and the Serving check
+      # panel's estimate beside measurement (null prints as "not measured", never as 0).
+      - name: Serving plan 과 Serving check 패널
+        run: node ui/serving_plan_test.js
 
   references-current:
     name: agent reference 가 코드와 맞는지

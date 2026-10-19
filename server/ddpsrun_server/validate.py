@@ -29,6 +29,7 @@ Grep anchor: HYPERUN-VALIDATE
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -1356,6 +1357,130 @@ def check_aws_credential_collision(env: dict[str, str], secrets: list[str],
     ]
 
 
+def check_serving_plan(serving_plan: "models.ServingPlanRequest | None",
+                       capacity_type: str | None, vendors: list[str],
+                       regions: list[str] | None, placement_mode: str | None,
+                       gpu_asked: bool, instance_type: str | None) -> list[Finding]:
+    """Is the serving plan one PACSrun will plan, and does the rest of the job agree with it.
+
+    HYPERUN-SERVING-PLAN. PLATFORM tier: every rule here is PACSrun's own refusal
+    (internal/controller/placement.go, validateServingPlan, and the CRD's enum, minimum and
+    pattern), said before the job exists. A refusal there arrives as a Pending job whose
+    status.message the submitter has to go and find; a refusal here names the field.
+
+    WHY THE VALUES ARE CHECKED HERE AND NOT BY THE REQUEST MODEL. ServingPlanRequest leaves
+    every field optional on purpose (its docstring says why): a 422 names a type rule, a
+    finding names the field, the value and what to send instead.
+
+    Args:
+        serving_plan: the request's block, or None for a job without one.
+        capacity_type, vendors, regions, placement_mode: as the request carries them, AFTER
+            SubmitRequest.serving_plan_placement filled the blanks, so a value here that is not
+            on-demand / [shadeform] is one the caller sent.
+        gpu_asked: whether the request has a `gpu` block at all.
+        instance_type: the pinned AWS machine, or None.
+
+    Returns:
+        Findings. Nothing for a job without a serving plan.
+    """
+    if serving_plan is None:
+        return []
+    findings: list[Finding] = []
+    sp = serving_plan
+    preset = " or ".join(models.SERVING_MODELS)
+
+    if sp.model not in models.SERVING_MODELS:
+        findings.append(Finding(
+            ERROR, "serving-plan-model",
+            (f"serving_plan.model is {sp.model!r}. " if sp.model else
+             "serving_plan.model is missing. ")
+            + f"The planner knows two models, {preset} (PACSrun's "
+            f"solver/shuntserve/plan.py, MODEL_PRESETS), and PACSrun's CRD refuses any other "
+            f"name.",
+            f"Send one of {preset}."))
+    for field_name, value, example in (("avg_input_tokens", sp.avg_input_tokens, 763),
+                                       ("avg_output_tokens", sp.avg_output_tokens, 232)):
+        if value is None or value < 1:
+            findings.append(Finding(
+                ERROR, "serving-plan-tokens",
+                f"serving_plan.{field_name} is "
+                + ("missing" if value is None else f"{value}")
+                + ". It is the average length of one request's "
+                + ("prompt" if field_name == "avg_input_tokens" else "answer")
+                + " in your traffic, in tokens, and PACSrun refuses anything below 1.",
+                f"Send a whole number of tokens; ShuntServe's own workload is {example}."))
+    for field_name, value, what, example in (
+            ("target_rps", sp.target_rps, "the request rate a plan must reach, in requests "
+             "per second", "2.0"),
+            ("hourly_budget", sp.hourly_budget, "the most a plan may cost in US dollars PER "
+             "HOUR for all of its machines together (an hourly rate: there is no total budget "
+             "and no duration)", "20.0")):
+        if value is None or not math.isfinite(value) or value <= 0:
+            findings.append(Finding(
+                ERROR, "serving-plan-" + field_name.replace("_", "-"),
+                f"serving_plan.{field_name} is "
+                + ("missing" if value is None else f"{value}")
+                + f". It is {what}, and PACSrun refuses a value that is not above 0.",
+                f"Send a number above 0, e.g. {example}."))
+
+    if capacity_type not in (None, models.SERVING_CAPACITY):
+        findings.append(Finding(
+            ERROR, "serving-plan-capacity",
+            f"capacity_type is {capacity_type!r}. The planner prices Shadeform's on-demand "
+            f"catalogue and Shadeform sells nothing else, so PACSrun refuses a serving plan "
+            f"under any other capacity type.",
+            "Leave capacity_type out (a serving plan sets on-demand) or send on-demand."))
+    # Only the part the caller sent that conflicts is quoted: regions [shadeform] is what the
+    # request model fills, and quoting it back would read as though the caller had named it.
+    named = []
+    if list(vendors) not in ([], [models.SERVING_VENDOR]):
+        named.append(f"vendors {list(vendors)}")
+    if list(regions or []) not in ([], [models.SERVING_VENDOR]):
+        named.append(f"regions {list(regions or [])}")
+    if named:
+        findings.append(Finding(
+            ERROR, "serving-plan-placement",
+            f"this job names {' and '.join(named)}. Only "
+            f"the placement word {models.SERVING_VENDOR} is answered with a serving plan, and "
+            f"PACSrun refuses one whose regions are anything but [{models.SERVING_VENDOR}]: "
+            f"any other candidate would price the pod shape instead and be ranked against the "
+            f"plan as though it served the model.",
+            f"Leave vendors and regions out; the server sends regions "
+            f"[{models.SERVING_VENDOR}]."))
+    if instance_type:
+        findings.append(Finding(
+            ERROR, "serving-plan-pinned",
+            f"instance_type pins the AWS machine {instance_type}, and a serving plan's machines "
+            f"are Shadeform machines the planner chooses.",
+            "Leave instance_type out."))
+    if gpu_asked:
+        findings.append(Finding(
+            WARNING, "serving-plan-gpu-ignored",
+            "the planner chooses the GPUs itself, so this job's `gpu` is not what picks the "
+            "machine (PACSrun's placement.go: a serving ask reaches the planner without a GPU "
+            "ask, which would otherwise name a card the answer ignores).",
+            "Leave gpu out, so the job says what it will actually get."))
+
+    budget = (f"${sp.hourly_budget:g}/h" if sp.hourly_budget and sp.hourly_budget > 0
+              else "the hourly budget")
+    if (placement_mode or "ordered") == "compare":
+        findings.append(Finding(
+            INFO, "serving-plan-compare",
+            "mode 'compare' with a serving plan: the planner ranks up to 50 plans, cheapest per "
+            "hour first, and NOTHING is rented. The plans appear on the job's page and as "
+            "`serving_plans` in GET /v1/jobs/{id}."))
+    else:
+        findings.append(Finding(
+            INFO, "serving-plan-rents",
+            f"without mode 'compare' the operator rents the cheapest plan that runs on ONE "
+            f"machine and runs this image there, billed at that plan's hourly price, which "
+            f"the planner keeps within {budget}. A plan spread over several machines is "
+            f"listed but cannot be rented yet.",
+            "Submit with placement_mode compare first to see the ranked plans; it rents "
+            "nothing."))
+    return findings
+
+
 # What no check here can see, because it would need the user's repository.
 NOT_CHECKED = (
     "whether this job's own arithmetic fits the card. Our memory and time "
@@ -1397,6 +1522,8 @@ def validate(
     instance_type: str | None = None,
     cpus: str | None = None,
     memory: str | None = None,
+    serving_plan: "models.ServingPlanRequest | None" = None,
+    gpu_asked: bool = False,
 ) -> Validation:
     """Run every check and sort what comes back.
 
@@ -1423,6 +1550,8 @@ def validate(
             bindings passes neither and the check simply does not run.
         instance_type: the machine the job pins, with one pod's `cpus` and
             `memory`, which decide whether a pod fits on it. HYPERUN-INSTANCE-PIN.
+        serving_plan: the request's serving plan block, with `gpu_asked` saying
+            whether the request also has a `gpu`. HYPERUN-SERVING-PLAN.
 
     Returns:
         A `Validation`. `ok` is False when any finding is an error.
@@ -1433,7 +1562,13 @@ def validate(
     # ── PLATFORM TIER (HYPERUN-CHECK-TIERS). True for every job, because each is
     # a fact about PACSrun, a vendor or a credential -- not about what the job
     # computes.
-    findings += check_vendors_can_run(vendors or [], placement_mode)
+    # HYPERUN-SERVING-PLAN. A serving plan has its own placement rules, and check_vendors_can_run
+    # would add two notes about ranking vendors against each other ("nothing-to-compare") for a
+    # job whose one candidate is the planner. So with a plan, its own check speaks instead.
+    if serving_plan is None:
+        findings += check_vendors_can_run(vendors or [], placement_mode)
+    findings += check_serving_plan(serving_plan, capacity_type, vendors or [], regions,
+                                   placement_mode, gpu_asked, instance_type)
     findings += check_instance_pin(instance_type, vendors or [], regions, cpus, memory,
                                    parallelism, capacity_type)
     # vendors GOES IN, and until 2026-09-08 it did not: the check judged every
@@ -1465,6 +1600,13 @@ def validate(
     findings.sort(key=lambda finding: order.get(finding.level, 3))
 
     not_checked = list(NOT_CHECKED)
+    if serving_plan is not None:
+        not_checked.insert(
+            0,
+            "whether any plan reaches your target rate within your hourly budget. The planner "
+            "answers that after submit, from the Shadeform price snapshot saved in PACSrun, and "
+            "that snapshot says nothing about which machines are in stock now.",
+        )
     if instance_type:
         not_checked.insert(
             0,

@@ -20,6 +20,11 @@ END-TO-END FLOW of one submission, which is what this whole stage exists to do:
   8. `GET /v1/jobs/{job_id}/logs` finds the driver pod behind that job and
      streams its stdout, redacting the runner's own bookkeeping lines.
 
+A job that sends `serving_plan` takes the same path: step 4 writes
+spec.placement.servingPlan, step 7 returns the planner's ranked plans, and
+`GET /v1/jobs/{job_id}/serving-check` reads back what a serving check measured
+(HYPERUN-SERVING-PLAN, HYPERUN-SERVING-CHECK-ROUTE).
+
 `/v1/explain` and `/v1/schema` were added with the CLI in stage 2. They make
 no judgement either — one is static prose, the other is generated from the
 request model — but they are what lets an agent use this service without having
@@ -96,6 +101,7 @@ from .models import (
     ImagesResponse,
     ScriptView,
     ScriptsResponse,
+    ServingCheckResponse,
     JobSpecResponse,
     JobView,
     NamespacesResponse,
@@ -985,8 +991,20 @@ def estimate_route(body: JudgementRequest, principal: PrincipalDep) -> EstimateR
         modelled=result.modelled,
         capacity_type=result.capacity_type,
         capacity_reason=result.capacity_reason,
-        warnings=result.warnings,
+        # HYPERUN-SERVING-PLAN. The estimator models a TRAINING run on a GPU the request
+        # names, and a serving plan names none: its price is the planner's answer, which
+        # exists only after submit. Said here so the hours and rate above are not read as
+        # the plan's.
+        warnings=result.warnings + ([SERVING_ESTIMATE_NOTE] if body.serving_plan else []),
     )
+
+
+SERVING_ESTIMATE_NOTE = (
+    "This job carries a serving plan, so the figures above do not price it: the planner "
+    "chooses the machines after submit and each plan's cost per hour, at most the hourly "
+    "budget, is on the job's page as serving_plans. placement_mode compare lists them and "
+    "rents nothing."
+)
 
 
 def _validation_for(body: JudgementRequest, request: Request,
@@ -1053,6 +1071,10 @@ def _validation_for(body: JudgementRequest, request: Request,
         instance_type=body.instance_type,
         cpus=body.cpus,
         memory=body.memory,
+        # HYPERUN-SERVING-PLAN. Whether PACSrun will plan this serving plan, and whether
+        # the rest of the job agrees with it; a no here keeps the job from being created.
+        serving_plan=body.serving_plan,
+        gpu_asked=body.gpu is not None,
     )
 
 
@@ -1596,7 +1618,16 @@ def list_namespaces(request: Request, principal: PrincipalDep) -> NamespacesResp
     )
 
 
-@app.get("/v1/jobs", response_model=JobListResponse)
+# HYPERUN-SERVING-PLAN. Each row leaves out `serving_plans`, and that is about the bytes. One
+# serving job carries up to 50 plans; the 12 plans of the 2026-10-19 Shadeform snapshot are 14.3
+# KB as the planner writes them (PACSrun's api/v1alpha1/hyperunjob_types.go, ServingPlans), so 50
+# are roughly 60 KB. The screen
+# polls this list every 15 s, which is 240 polls an hour: ten such jobs in one namespace would be
+# 10 x 60 KB x 240 = 144 MB an hour for one open tab, about $0.013 an hour at AWS's $0.09/GB
+# internet egress, for a column the list never draws. The detail route still returns them, and
+# `serving_plan_chosen` (one small object) stays on the row.
+@app.get("/v1/jobs", response_model=JobListResponse,
+         response_model_exclude={"jobs": {"__all__": {"serving_plans"}}})
 def list_jobs(
     request: Request,
     principal: PrincipalDep,
@@ -2121,6 +2152,82 @@ def get_artifacts(
         truncated=listing.truncated,
         note="" if files else "Nothing is uploaded here yet.",
     )
+
+
+@app.get("/v1/jobs/{job_id}/serving-check", response_model=ServingCheckResponse)
+def get_serving_check(
+    request: Request,
+    job_id: str,
+    principal: PrincipalDep,
+    namespace: str = NAMESPACE_QUERY,
+) -> ServingCheckResponse:
+    """What a serving check measured, next to what the planner estimated.
+
+    HYPERUN-SERVING-CHECK-ROUTE. Reads ONE file from the job's own result path,
+    `serving-check-result.json`, and returns its JSON when it declares the schema
+    `hyperun.serving-check/v1`. The prefix is the one on the job object, through
+    the same owner gate as the artifacts route; artifacts.py narrates the read and
+    why the server makes it rather than the browser.
+
+    COST, per call: one S3 GetObject ($0.0004 per 1,000 in S3 Standard), a
+    transfer from S3 to this pod in the same region (free), and the file out
+    to the browser at AWS's $0.09/GB, a few KB. The screen calls it once per
+    open of a job whose file list shows the file, and on Refresh.
+
+    Raises:
+        HTTPException: 404 for an unknown job; 502 when the cluster or S3
+            refused, with S3's own words.
+    """
+    cluster: Cluster = request.app.state.cluster
+    name = resolve_object_name(job_id)
+    try:
+        obj: dict[str, Any] = require_owner(
+            cluster.get_job(namespace_for(principal, namespace), name), principal)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="no such job") from exc
+    except ClusterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    file_name = artifacts.SERVING_CHECK_FILE
+    address = artifacts.split_result_path((obj.get("spec") or {}).get("resultPath") or "")
+    if address is None:
+        return ServingCheckResponse(
+            found=False, name=file_name,
+            note="This job has no result path, so there is no serving check to read.")
+
+    settings: Settings = request.app.state.settings
+    bucket, prefix = address
+    try:
+        raw = artifacts.read_small_object(
+            bucket, prefix + file_name,
+            result_bucket=settings.result_bucket,
+            result_prefix=settings.result_prefix,
+            max_bytes=artifacts.SERVING_CHECK_MAX_BYTES,
+        )
+    except artifacts.ForeignResultPath as exc:
+        return ServingCheckResponse(found=False, name=file_name, note=str(exc))
+    except artifacts.NotUploaded:
+        return ServingCheckResponse(
+            found=False, name=file_name,
+            note=f"{file_name} is not in this job's result path (yet). A serving check "
+                 f"uploads it as soon as its three bench runs end.")
+    except artifacts.TooLarge as exc:
+        return ServingCheckResponse(found=False, name=file_name, note=str(exc))
+    except Exception as exc:  # noqa: BLE001 - botocore raises several types here
+        raise HTTPException(status_code=502, detail=f"S3 refused the read: {exc}") from exc
+
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        return ServingCheckResponse(
+            found=False, name=file_name, note=f"{file_name} is not JSON.")
+    schema = document.get("schema") if isinstance(document, dict) else None
+    if schema != artifacts.SERVING_CHECK_SCHEMA:
+        return ServingCheckResponse(
+            found=False, name=file_name,
+            note=f"{file_name} declares schema {schema!r}, not "
+                 f"{artifacts.SERVING_CHECK_SCHEMA!r}, so it is not read as a serving check.")
+    return ServingCheckResponse(found=True, name=file_name, check=document)
 
 
 @app.post("/v1/jobs/{job_id}/exec", response_model=ExecResponse)

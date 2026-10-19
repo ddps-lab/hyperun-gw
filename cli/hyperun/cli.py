@@ -175,6 +175,29 @@ def job_arguments() -> argparse.ArgumentParser:
         "with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says "
         "whether PACSrun can place it and how many machines the job rents.",
     )
+    # HYPERUN-SERVING-PLAN. The request's `serving_plan` block, one flag per field. Any of them
+    # turns the block on; the server answers a missing one with a validate finding that names
+    # it, so nothing here decides which are required. The model names are NOT argparse choices,
+    # for the reason --vendor's are not: the server owns the list and names the good ones.
+    shared.add_argument(
+        "--serving-model", metavar="NAME",
+        help="ask the ShuntServe planner which Shadeform machines serve this model at "
+        "--target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or "
+        "llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, "
+        "--vendor, --region and --gpu-* out. With --placement-mode compare the plans are only "
+        "ranked; otherwise the cheapest plan that runs on one machine is rented.",
+    )
+    shared.add_argument("--avg-input-tokens", type=int, metavar="N",
+                        help="serving plan: average prompt length of the traffic, in tokens")
+    shared.add_argument("--avg-output-tokens", type=int, metavar="N",
+                        help="serving plan: average answer length of the traffic, in tokens")
+    shared.add_argument("--target-rps", type=float, metavar="RPS",
+                        help="serving plan: the request rate a plan must reach, requests/second")
+    shared.add_argument(
+        "--hourly-budget", type=float, metavar="USD",
+        help="serving plan: the most a plan may cost, US dollars PER HOUR for all its machines "
+        "together. An hourly rate; there is no total budget or duration.",
+    )
     shared.add_argument(
         "--expected-hours", type=float, help="your own guess at the runtime, in hours"
     )
@@ -592,6 +615,19 @@ def build_submit_body(args: argparse.Namespace) -> dict[str, Any]:
     # widen what the file allowed.
     if getattr(args, "region", None):
         body["regions"] = list(dict.fromkeys(args.region))
+    # HYPERUN-SERVING-PLAN. A flag overrides the same field of a file's `serving_plan`, and the
+    # rest of the file's block is kept, the way --gpu-count overrides one field of `gpu`.
+    serving = dict(body.get("serving_plan") or {})
+    for flag, field in (
+        ("serving_model", "model"), ("avg_input_tokens", "avg_input_tokens"),
+        ("avg_output_tokens", "avg_output_tokens"), ("target_rps", "target_rps"),
+        ("hourly_budget", "hourly_budget"),
+    ):
+        value = getattr(args, flag, None)
+        if value is not None:
+            serving[field] = value
+    if serving:
+        body["serving_plan"] = serving
 
     # A GPU is asked for in exactly one of two styles, by memory or by model.
     # TWO CASES THAT LOOK ALIKE AND ARE NOT:
@@ -664,7 +700,10 @@ def build_submit_body(args: argparse.Namespace) -> dict[str, Any]:
 # of them leaves, the server's own schema is asked whether it knows the field. That
 # is one unauthenticated GET, made only when such a field is in the body -- which
 # also covers a body read from -f.
-FIELDS_A_SERVER_MUST_KNOW = ("instance_type",)
+#
+# `serving_plan` is on the list for the same reason (HYPERUN-SERVING-PLAN): a server without it
+# drops the block and runs the image as an ordinary job, on whatever its solver picks.
+FIELDS_A_SERVER_MUST_KNOW = ("instance_type", "serving_plan")
 
 
 def require_known_fields(client: Any, body: dict[str, Any]) -> None:
@@ -680,10 +719,13 @@ def require_known_fields(client: Any, body: dict[str, Any]) -> None:
     known = (client.schema() or {}).get("properties") or {}
     missing = [name for name in used if name not in known]
     if missing:
+        flags = {"instance_type": "--instance-type",
+                 "serving_plan": "the serving plan (--serving-model and the four after it)"}
         raise SystemExit(
             f"this server does not know {', '.join(missing)}. It would drop the field "
             f"and still run the job, on whatever machine its solver picks. Ask whoever "
-            f"runs the server to upgrade it, or leave --instance-type out."
+            f"runs the server to upgrade it, or leave "
+            f"{' and '.join(flags[name] for name in missing)} out."
         )
 
 
@@ -1161,6 +1203,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     # the one they chose. An older server sends no note, and nothing is printed.
     if view.get("placement_note"):
         print(f"  placement  {view['placement_note']}")
+    # HYPERUN-SERVING-PLAN. The plan the operator rented, then one line on the ranked list.
+    # The list itself is up to 50 plans of nested pipelines, which `--json` prints whole; an
+    # older server sends neither field and nothing is printed.
+    chosen = view.get("serving_plan_chosen")
+    if chosen:
+        print(f"  serving    plan {chosen.get('rank')}: {chosen.get('instance_type')} "
+              f"({chosen.get('cloud')} / {chosen.get('region')}), "
+              f"${chosen.get('cost_per_hour')}/h, estimated {chosen.get('throughput_rps')} "
+              f"req/s, attempt {chosen.get('attempt')}")
+    plans = view.get("serving_plans") or []
+    if plans:
+        cheapest = plans[0]
+        print(f"  plans      {len(plans)} ranked; the cheapest is ${cheapest.get('cost_per_hour')}"
+              f"/h for {cheapest.get('throughput_rps')} req/s on {cheapest.get('nodes')} "
+              f"machine(s). --json lists them all")
     if view.get("recovery_count"):
         # Not a failure: the job was restarted. It used to say "the machine was
         # reclaimed" every time, which was wrong for job-a9ea30b8ba7a -- its three
