@@ -2758,7 +2758,7 @@ def _serving_job(cluster):
                                            "zone": "montreal-canada-2", "layers": 32,
                                            "tp": 1, "pricePerHour": "1.3500"}]}],
             }],
-            "servingPlanChosen": {"rank": 1, "instanceType": "hyperstack_A100_80G",
+            "servingPlanChosen": {"rank": 1, "instanceType": "A100_80G",
                                   "cloud": "hyperstack", "region": "montreal-canada-2",
                                   "costPerHour": "1.3500", "throughputRPS": "16.953",
                                   "latencySeconds": "1.760", "attempt": 1},
@@ -2771,7 +2771,9 @@ def test_the_job_carries_its_plans_and_the_one_rented(client, cluster):
     view = as_alice(client, "GET", f"/v1/jobs/{JOB_ID}").json()
     assert view["serving_plans"][0]["pipelines"][0]["stages"][0]["layers"] == 32
     assert view["serving_plans"][0]["executable"] is True
-    assert view["serving_plan_chosen"]["instance_type"] == "hyperstack_A100_80G"
+    # The bare Shadeform type the driver rents; the provider is `cloud` (PACSrun's CRD).
+    assert view["serving_plan_chosen"]["instance_type"] == "A100_80G"
+    assert view["serving_plan_chosen"]["cloud"] == "hyperstack"
     assert view["serving_plan_chosen"]["attempt"] == 1
 
 
@@ -2863,3 +2865,11 @@ def test_another_users_serving_check_reads_as_absent(client, cluster):
     response = client.get(f"/v1/jobs/{JOB_ID}/serving-check",
                           headers={"Authorization": "Bearer bob-token"})
     assert response.status_code == 404
+
+
+def test_a_renting_serving_job_with_two_pods_is_refused_before_a_job_exists(client, cluster):
+    body = submit_body(serving_plan=SERVING_ASK, parallelism=2)
+    response = as_alice(client, "POST", "/v1/jobs", json=body)
+    assert response.status_code == 400
+    assert "[serving-plan-parallelism]" in response.json()["detail"]
+    assert cluster.created == []

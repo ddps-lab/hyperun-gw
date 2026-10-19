@@ -304,7 +304,7 @@ What `GET /v1/jobs/{id}` returns.
 | `placement_note` |  | One sentence: where the job was asked to go, where it runs, and -- when those differ -- that it did not land on the first vendor asked. Written to be passed to the user as it is. |
 | `recovery_count` |  | How many times the job was restarted: after losing a machine, or after an offering failed to start and was skipped. `failed_offerings` counts the offerings skipped either way. |
 | `result_path` |  | Where the output is. This is the one place a namespace name crosses the API boundary, because it is part of the S3 key. The screen now downloads through /v1/jobs/{id}/artifacts instead, but this field stays: the CLI and scripts read results with `aws s3 sync <this>`. |
-| `serving_plan_chosen` |  | HYPERUN-SERVING-PLAN. The plan the operator rented and runs this job on, from status.servingPlanChosen, with the attempt it is on. Null in compare mode, which rents nothing, and before a plan is rented. |
+| `serving_plan_chosen` |  | HYPERUN-SERVING-PLAN. The plan this job rents, or last tried to rent, from status.servingPlanChosen, with how many plans it has chosen so far. Null in compare mode, which rents nothing, and before a plan is chosen. |
 | `serving_plans` |  | HYPERUN-SERVING-PLAN. The planner's ranked rental plans for a job that sent `serving_plan`, cheapest per hour first, up to 50, from status.servingPlans. Empty until the planner has answered and for every other job. Left OUT of GET /v1/jobs, whose rows are polled every 15 s: read GET /v1/jobs/{id}. |
 | `started_at` |  | When the job's pod first ran, from status.startedAt (HYPERUN-JOB-CLOCK). Absent while the job is still waiting for a machine, which is exactly what makes queue time visible: started_at - created_at is the wait, finished_at - started_at is the run. |
 | `stopped` |  | Whether a pause has been ASKED FOR, from spec.stopped. ★ It is the request and not the outcome: the machine pauses seconds to a minute later, and on some vendors it cannot pause at all -- Shadeform has no stop API, a spot instance has no stopped state, a RunPod pod with no volume would lose everything. `phase == 'Stopped'` is the statement that it actually happened. A screen that read this one as 'paused' would tell somebody a $6/hour machine had stopped billing when it had not. |
@@ -336,7 +336,7 @@ A submit request plus the facts needed to judge it.
 | `regions` |  | Which regions may answer, as PACSrun's placement.regions spells them: a bare vendor ('gcp'), or a vendor and region ('aws/us-east-1'). EMPTY IS NOT 'anywhere' FOR AWS -- it is the operator's one default region, us-west-2 in this deployment (PACSrun's placement.go:376, grep HYPERUN-AWS-ONE-REGION). So a job that wants a cheaper region has to name it. GET /v1/prices lists every region the catalogue prices. |
 | `script` |  | The text of your run.sh. Four validate checks are skipped without it. IT IS ALSO WHAT RUNS when you send no `command` and no `args`: the job then gets args ['bash','-lc',<this text>], which is the same shape the screen sends and the shape GET /v1/scripts reads back. An explicit `command` or `args` wins, for the case where the script is fetched inside the container instead. Never stored anywhere -- it lives on the job, so deleting the job deletes it. |
 | `secrets` |  | ENVIRONMENT VARIABLE names to inject — the names your script reads, e.g. ["GITHUB_PAT"]. NOT the name of a Kubernetes Secret: the server maps each one to a Secret and key itself. The value never travels through this API, and neither does that internal name. Ask `hyperun secrets` for the list this deployment accepts; a name that is not on it is refused. |
-| `serving_plan` |  | Ask the ShuntServe planner which Shadeform machines would serve a model at target_rps for the least money per hour, instead of naming a GPU. The job then goes out on-demand with regions [shadeform]; leave capacity_type, vendors, regions, gpu and instance_type out. With placement_mode 'compare' the plans are ranked and nothing is rented; with any other mode the cheapest plan that runs on one machine is rented and this image runs there. The ranked plans come back as `serving_plans` on the job. HYPERUN-SERVING-PLAN. |
+| `serving_plan` |  | Ask the ShuntServe planner which Shadeform machines would serve a model at target_rps for the least money per hour, instead of naming a GPU. The job then goes out on-demand with regions [shadeform]; leave capacity_type, vendors, regions, gpu and instance_type out. With placement_mode 'compare' the plans are ranked and nothing is rented; with any other mode the cheapest plan that runs on one machine is rented, this image runs there, and parallelism must be 1. The ranked plans come back as `serving_plans` on the job. HYPERUN-SERVING-PLAN. |
 | `training` |  |  |
 | `vendors` |  | WHO the machines may be bought from, in the order they are asked. Empty, with no regions either, sends the job with every runnable vendor (shadeform, runpod, aws) and placement_mode 'cheapest', so it buys the cheapest answer (spot jobs excepted: they go to AWS alone, the only one selling spot). Runnable: aws, runpod, shadeform. Price-only: gcp, azure, lambda, nebius -- these are answered from catalogue CSVs and no actuator here can rent from them, so list one only together with placement_mode 'compare', which stops after the ranking. |
 
@@ -571,18 +571,19 @@ One copy of the model, its layers split in order across its stages' machines.
 
 ### ServingPlanChosenView
 
-status.servingPlanChosen: the plan the operator rented, outside compare mode.
+status.servingPlanChosen: the plan the job rents, or last tried to rent. Absent in
+compare mode. The wording below is PACSrun's CRD's (HYPERUN-SHUNTSERVE-EXECUTE).
 
 | field | required | description |
 |---|---|---|
-| `attempt` |  | The operator's attempt counter for this rental, copied as written (status.servingPlanChosen.attempt). |
-| `cloud` |  | The provider behind Shadeform. |
-| `cost_per_hour` |  | US dollars per hour. |
-| `instance_type` |  | The Shadeform machine rented. |
-| `latency_seconds` |  | The planner's estimate. |
+| `attempt` |  | How many plans this job has chosen, this one included: 1 first, one more on each failover to a different plan. |
+| `cloud` |  | The provider behind Shadeform, e.g. `hyperstack`. |
+| `cost_per_hour` |  | The plan's estimate, US dollars per hour. |
+| `instance_type` |  | The Shadeform instance type exactly as the driver pod is told to rent it, e.g. `A100_80G`; the provider and region are `cloud` and `region`. |
+| `latency_seconds` |  | The plan's estimate. |
 | `rank` | yes | Its rank in `serving_plans`. |
 | `region` |  | The Shadeform region. |
-| `throughput_rps` |  | The planner's estimate. |
+| `throughput_rps` |  | The plan's estimate. |
 
 ### ServingPlanRequest
 
@@ -604,8 +605,8 @@ One rental plan from status.servingPlans.
 | field | required | description |
 |---|---|---|
 | `cost_per_hour` |  | The whole plan, every machine together, in US dollars per hour. |
-| `executable` |  | True when the plan runs on ONE machine, which is the only kind the operator can rent and run today. Null from an operator that does not write it. |
-| `latency_seconds` |  | The planner's estimate of one request's latency. Null from an operator that does not write it. |
+| `executable` |  | True when one machine runs the whole plan (one pipeline of one stage), the only kind of plan a job can rent. Null from an operator that does not write it. |
+| `latency_seconds` |  | The planner's estimate of one request's latency on the plan's slowest pipeline, in seconds. Null from an operator that does not write it. |
 | `nodes` |  | How many machines the plan rents. |
 | `pipelines` |  |  |
 | `price_basis` |  | What the prices are for; `on_demand`. |

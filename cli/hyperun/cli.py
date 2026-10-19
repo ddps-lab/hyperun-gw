@@ -185,7 +185,8 @@ def job_arguments() -> argparse.ArgumentParser:
         "--target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or "
         "llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, "
         "--vendor, --region and --gpu-* out. With --placement-mode compare the plans are only "
-        "ranked; otherwise the cheapest plan that runs on one machine is rented.",
+        "ranked; otherwise the cheapest plan that runs on one machine is rented, and "
+        "--parallelism must stay 1.",
     )
     shared.add_argument("--avg-input-tokens", type=int, metavar="N",
                         help="serving plan: average prompt length of the traffic, in tokens")

@@ -105,7 +105,7 @@ Nothing is submitted. An answer of `unknown` is a real answer: the last time we 
 | `--cpus CPUS` |  | CPU request, e.g. "4" |
 | `--memory MEMORY` |  | memory request, e.g. "16Gi" |
 | `--instance-type TYPE` |  | the exact AWS machine to run on, e.g. t3.xlarge. Leave it out to let the solver choose: a pinned job runs on this type or waits. AWS only, and not with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says whether PACSrun can place it and how many machines the job rents. |
-| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model at --target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the cheapest plan that runs on one machine is rented. |
+| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model at --target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the cheapest plan that runs on one machine is rented, and --parallelism must stay 1. |
 | `--avg-input-tokens N` |  | serving plan: average prompt length of the traffic, in tokens |
 | `--avg-output-tokens N` |  | serving plan: average answer length of the traffic, in tokens |
 | `--target-rps RPS` |  | serving plan: the request rate a plan must reach, requests/second |
@@ -147,7 +147,7 @@ Nothing is submitted. Pass --script to unlock four more checks.
 | `--cpus CPUS` |  | CPU request, e.g. "4" |
 | `--memory MEMORY` |  | memory request, e.g. "16Gi" |
 | `--instance-type TYPE` |  | the exact AWS machine to run on, e.g. t3.xlarge. Leave it out to let the solver choose: a pinned job runs on this type or waits. AWS only, and not with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says whether PACSrun can place it and how many machines the job rents. |
-| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model at --target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the cheapest plan that runs on one machine is rented. |
+| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model at --target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the cheapest plan that runs on one machine is rented, and --parallelism must stay 1. |
 | `--avg-input-tokens N` |  | serving plan: average prompt length of the traffic, in tokens |
 | `--avg-output-tokens N` |  | serving plan: average answer length of the traffic, in tokens |
 | `--target-rps RPS` |  | serving plan: the request rate a plan must reach, requests/second |
@@ -189,7 +189,7 @@ Give a YAML or JSON file, or build the request from flags, or both. Flags win ov
 | `--cpus CPUS` |  | CPU request, e.g. "4" |
 | `--memory MEMORY` |  | memory request, e.g. "16Gi" |
 | `--instance-type TYPE` |  | the exact AWS machine to run on, e.g. t3.xlarge. Leave it out to let the solver choose: a pinned job runs on this type or waits. AWS only, and not with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says whether PACSrun can place it and how many machines the job rents. |
-| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model at --target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the cheapest plan that runs on one machine is rented. |
+| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model at --target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the cheapest plan that runs on one machine is rented, and --parallelism must stay 1. |
 | `--avg-input-tokens N` |  | serving plan: average prompt length of the traffic, in tokens |
 | `--avg-output-tokens N` |  | serving plan: average answer length of the traffic, in tokens |
 | `--target-rps RPS` |  | serving plan: the request rate a plan must reach, requests/second |

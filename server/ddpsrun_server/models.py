@@ -527,8 +527,9 @@ class SubmitRequest(BaseModel):
         "target_rps for the least money per hour, instead of naming a GPU. The job then goes "
         "out on-demand with regions [shadeform]; leave capacity_type, vendors, regions, gpu and "
         "instance_type out. With placement_mode 'compare' the plans are ranked and nothing is "
-        "rented; with any other mode the cheapest plan that runs on one machine is rented and "
-        "this image runs there. The ranked plans come back as `serving_plans` on the job. "
+        "rented; with any other mode the cheapest plan that runs on one machine is rented, this "
+        "image runs there, and parallelism must be 1. The ranked plans come back as "
+        "`serving_plans` on the job. "
         "HYPERUN-SERVING-PLAN.",
     )
 
@@ -1093,28 +1094,34 @@ class ServingPlanView(BaseModel):
     throughput_rps: str | None = Field(default=None, description="The planner's estimate, "
                                        "requests per second: the sum of its pipelines'.")
     latency_seconds: str | None = Field(default=None, description="The planner's estimate "
-                                        "of one request's latency. Null from an operator that "
-                                        "does not write it.")
+                                        "of one request's latency on the plan's slowest "
+                                        "pipeline, in seconds. Null from an operator that does "
+                                        "not write it.")
     nodes: int = Field(default=0, description="How many machines the plan rents.")
-    executable: bool | None = Field(default=None, description="True when the plan runs on "
-                                    "ONE machine, which is the only kind the operator can rent "
-                                    "and run today. Null from an operator that does not write "
-                                    "it.")
+    executable: bool | None = Field(default=None, description="True when one machine runs the "
+                                    "whole plan (one pipeline of one stage), the only kind of "
+                                    "plan a job can rent. Null from an operator that does not "
+                                    "write it.")
     pipelines: list[ServingPipelineView] = Field(default_factory=list)
 
 
 class ServingPlanChosenView(BaseModel):
-    """status.servingPlanChosen: the plan the operator rented, outside compare mode."""
+    """status.servingPlanChosen: the plan the job rents, or last tried to rent. Absent in
+    compare mode. The wording below is PACSrun's CRD's (HYPERUN-SHUNTSERVE-EXECUTE)."""
 
     rank: int = Field(description="Its rank in `serving_plans`.")
-    instance_type: str = Field(default="", description="The Shadeform machine rented.")
-    cloud: str = Field(default="", description="The provider behind Shadeform.")
+    instance_type: str = Field(default="", description="The Shadeform instance type exactly "
+                               "as the driver pod is told to rent it, e.g. `A100_80G`; the "
+                               "provider and region are `cloud` and `region`.")
+    cloud: str = Field(default="", description="The provider behind Shadeform, e.g. "
+                       "`hyperstack`.")
     region: str = Field(default="", description="The Shadeform region.")
-    cost_per_hour: str | None = Field(default=None, description="US dollars per hour.")
-    throughput_rps: str | None = Field(default=None, description="The planner's estimate.")
-    latency_seconds: str | None = Field(default=None, description="The planner's estimate.")
-    attempt: int = Field(default=0, description="The operator's attempt counter for this "
-                         "rental, copied as written (status.servingPlanChosen.attempt).")
+    cost_per_hour: str | None = Field(default=None, description="The plan's estimate, US "
+                                      "dollars per hour.")
+    throughput_rps: str | None = Field(default=None, description="The plan's estimate.")
+    latency_seconds: str | None = Field(default=None, description="The plan's estimate.")
+    attempt: int = Field(default=0, description="How many plans this job has chosen, this one "
+                         "included: 1 first, one more on each failover to a different plan.")
 
 
 def serving_plans_from(status: dict[str, Any]) -> list[ServingPlanView]:
@@ -1315,9 +1322,9 @@ class JobView(BaseModel):
     )
     serving_plan_chosen: ServingPlanChosenView | None = Field(
         default=None,
-        description="HYPERUN-SERVING-PLAN. The plan the operator rented and runs this job on, "
-        "from status.servingPlanChosen, with the attempt it is on. Null in compare mode, "
-        "which rents nothing, and before a plan is rented.",
+        description="HYPERUN-SERVING-PLAN. The plan this job rents, or last tried to rent, "
+        "from status.servingPlanChosen, with how many plans it has chosen so far. Null in "
+        "compare mode, which rents nothing, and before a plan is chosen.",
     )
 
     @staticmethod

@@ -1360,7 +1360,8 @@ def check_aws_credential_collision(env: dict[str, str], secrets: list[str],
 def check_serving_plan(serving_plan: "models.ServingPlanRequest | None",
                        capacity_type: str | None, vendors: list[str],
                        regions: list[str] | None, placement_mode: str | None,
-                       gpu_asked: bool, instance_type: str | None) -> list[Finding]:
+                       gpu_asked: bool, instance_type: str | None,
+                       parallelism: int = 1) -> list[Finding]:
     """Is the serving plan one PACSrun will plan, and does the rest of the job agree with it.
 
     HYPERUN-SERVING-PLAN. PLATFORM tier: every rule here is PACSrun's own refusal
@@ -1379,6 +1380,7 @@ def check_serving_plan(serving_plan: "models.ServingPlanRequest | None",
             on-demand / [shadeform] is one the caller sent.
         gpu_asked: whether the request has a `gpu` block at all.
         instance_type: the pinned AWS machine, or None.
+        parallelism: how many pods. A plan that is RENTED is one VM, which holds one pod.
 
     Returns:
         Findings. Nothing for a job without a serving plan.
@@ -1461,9 +1463,21 @@ def check_serving_plan(serving_plan: "models.ServingPlanRequest | None",
             "ask, which would otherwise name a card the answer ignores).",
             "Leave gpu out, so the job says what it will actually get."))
 
+    renting = (placement_mode or "ordered") != "compare"
+    if renting and parallelism != 1:
+        # PACSrun refuses this at placement (placement.go, HYPERUN-SHUNTSERVE-EXECUTE): the
+        # decider answers one machine, and a solve for more pods than that would reach the
+        # actuator with one machine for several pods and fail there.
+        findings.append(Finding(
+            ERROR, "serving-plan-parallelism",
+            f"parallelism is {parallelism}. A rented serving plan is ONE machine holding the "
+            f"whole model, which runs one pod, and PACSrun refuses a renting serving job whose "
+            f"parallelism is not 1.",
+            "Send parallelism 1, or placement_mode compare to only rank the plans."))
+
     budget = (f"${sp.hourly_budget:g}/h" if sp.hourly_budget and sp.hourly_budget > 0
               else "the hourly budget")
-    if (placement_mode or "ordered") == "compare":
+    if not renting:
         findings.append(Finding(
             INFO, "serving-plan-compare",
             "mode 'compare' with a serving plan: the planner ranks up to 50 plans, cheapest per "
@@ -1474,8 +1488,9 @@ def check_serving_plan(serving_plan: "models.ServingPlanRequest | None",
             INFO, "serving-plan-rents",
             f"without mode 'compare' the operator rents the cheapest plan that runs on ONE "
             f"machine and runs this image there, billed at that plan's hourly price, which "
-            f"the planner keeps within {budget}. A plan spread over several machines is "
-            f"listed but cannot be rented yet.",
+            f"the planner keeps within {budget}. If that rental fails it moves to the next "
+            f"one-machine plan, and when there is none the job fails. A plan spread over "
+            f"several machines is listed but cannot be rented yet.",
             "Submit with placement_mode compare first to see the ranked plans; it rents "
             "nothing."))
     return findings
@@ -1568,7 +1583,7 @@ def validate(
     if serving_plan is None:
         findings += check_vendors_can_run(vendors or [], placement_mode)
     findings += check_serving_plan(serving_plan, capacity_type, vendors or [], regions,
-                                   placement_mode, gpu_asked, instance_type)
+                                   placement_mode, gpu_asked, instance_type, parallelism)
     findings += check_instance_pin(instance_type, vendors or [], regions, cpus, memory,
                                    parallelism, capacity_type)
     # vendors GOES IN, and until 2026-09-08 it did not: the check judged every

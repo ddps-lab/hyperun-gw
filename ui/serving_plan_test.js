@@ -136,8 +136,11 @@ check(body.serving_plan.avg_output_tokens === null && body.serving_plan.target_r
 console.log("servingRules: what choosing a model does to the rest of the form");
 
 setForm({ capacity: "spot", gpu: "L40S", regions: "aws/us-east-1", vendors: ["aws", "gcp"] });
+$("f-parallelism").value = "4";
 $("f-serve-model").value = "llama-3.1-8b";
 servingRules();
+check(String($("f-parallelism").value) === "1" && $("f-parallelism").disabled,
+  "parallelism is 1 and cannot be changed: a rented plan is one machine running one pod");
 check($("f-capacity").value === "on-demand" && capacityOptions[1].disabled,
   "capacity is on-demand and spot cannot be picked: Shadeform sells nothing else");
 check(vendorBoxes.every((b) => !b.checked && b.disabled),
@@ -161,7 +164,8 @@ check(/nothing is rented/.test($("f-serve-note").innerHTML),
 $("f-serve-model").value = "";
 servingRules();
 check(!capacityOptions[1].disabled && vendorBoxes.every((b) => !b.disabled) &&
-      !$("f-regions").disabled && !$("f-gpu").disabled && $("f-serve-note").innerHTML === "",
+      !$("f-regions").disabled && !$("f-gpu").disabled && !$("f-parallelism").disabled &&
+      $("f-serve-note").innerHTML === "",
   "clearing the model gives every box back and drops the note");
 
 // ---------------------------------------------------------------------------------------------
@@ -190,7 +194,8 @@ const PLANS = [
 ];
 const ASKED = { planner: "shuntserve", model: "llama-3.1-70b", avgInputTokens: 763,
                 avgOutputTokens: 232, targetRPS: "2.0", hourlyBudget: "20.8333" };
-const CHOSEN = { rank: 3, instance_type: "excesssupply_A100_sxm4_80Gx8_2", cloud: "excesssupply",
+// instance_type is the bare Shadeform type the driver rents; the provider is `cloud` (PACSrun CRD).
+const CHOSEN = { rank: 3, instance_type: "A100_sxm4_80Gx8_2", cloud: "excesssupply",
                  region: "omaha-usa-2", cost_per_hour: "10.8000", throughput_rps: "12.283",
                  latency_seconds: "2.042", attempt: 2 };
 

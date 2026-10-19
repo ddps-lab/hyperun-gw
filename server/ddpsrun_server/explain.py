@@ -85,9 +85,11 @@ SERVING A MODEL
   planner ranks up to 50 Shadeform plans, cheapest per hour first, and
   GET /v1/jobs/{id} returns them as "serving_plans". With placement_mode
   "compare" nothing is rented. Otherwise the cheapest plan that runs on one
-  machine is rented, your image runs there, and "serving_plan_chosen" says which.
-  Leave capacity_type, vendors, regions and gpu out: a plan runs on-demand on
-  shadeform, and /v1/validate refuses anything else by name.
+  machine is rented, your image runs there, and "serving_plan_chosen" says which;
+  if that rental fails the next one-machine plan is tried. Leave capacity_type,
+  vendors, regions and gpu out and keep parallelism 1: a plan runs on-demand on
+  shadeform, one pod on one machine, and /v1/validate refuses anything else by
+  name.
 
 PHASES
   Pending     accepted, nothing bought yet

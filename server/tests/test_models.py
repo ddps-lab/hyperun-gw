@@ -875,7 +875,7 @@ SERVING_STATUS = {
                   {"instanceType": "excesssupply_A100_sxm4_80Gx8_2", "zone": "omaha-usa-2",
                    "layers": 80, "tp": 8, "pricePerHour": "10.8000"}]}]},
     ],
-    "servingPlanChosen": {"rank": 3, "instanceType": "excesssupply_A100_sxm4_80Gx8_2",
+    "servingPlanChosen": {"rank": 3, "instanceType": "A100_sxm4_80Gx8_2",
                           "cloud": "excesssupply", "region": "omaha-usa-2",
                           "costPerHour": "10.8000", "throughputRPS": "12.283",
                           "latencySeconds": "2.042", "attempt": 2},
@@ -897,7 +897,7 @@ def test_the_view_carries_the_ranked_plans_and_the_one_rented():
         ("hyperstack_A100_80Gx2", "montreal-canada-2", 53, 2, "2.7000")
     chosen = view.serving_plan_chosen
     assert (chosen.rank, chosen.instance_type, chosen.cloud, chosen.region, chosen.attempt) == \
-        (3, "excesssupply_A100_sxm4_80Gx8_2", "excesssupply", "omaha-usa-2", 2)
+        (3, "A100_sxm4_80Gx8_2", "excesssupply", "omaha-usa-2", 2)
     # Strings as the operator wrote them, never floats: 8.07 must not print as 8.069999...
     assert view.model_dump()["serving_plans"][0]["cost_per_hour"] == "8.0700"
 

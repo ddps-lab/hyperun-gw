@@ -762,9 +762,9 @@
          WHAT CHOOSING A MODEL CHANGES ELSEWHERE ON THIS FORM, and why it is forced rather than
          left to a refusal. PACSrun plans a serving plan only on-demand and only for the
          placement word shadeform, and the planner picks the GPUs itself, so a spot box, a vendor
-         box, a region or a GPU would each be refused or ignored. servingRules() sets capacity to
-         on-demand, clears and disables the vendor boxes, the regions and the GPU, and says so in
-         the note below. Placement mode is NOT changed: compare ranks the plans and rents
+         box, a region or a GPU would each be refused or ignored, and a rented plan is one machine
+         running one pod. servingRules() sets capacity to on-demand and parallelism to 1, clears
+         and disables the vendor boxes, the regions and the GPU, and says so in the note below. Placement mode is NOT changed: compare ranks the plans and rents
          nothing, any other mode rents the cheapest plan that runs on one machine, and the note
          says which of the two this form will do.
          FOLDED, IT STILL SENDS WHAT IS IN IT, so the summary says so (the HYPERUN-TRAINING-SIZE

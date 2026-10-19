@@ -694,10 +694,10 @@ def serving(**overrides):
 
 
 def check_plan(plan, capacity="on-demand", vendors=(), regions=("shadeform",), mode="compare",
-          gpu_asked=False, instance_type=None):
+               gpu_asked=False, instance_type=None, parallelism=1):
     """The serving check alone, with the placement the request model fills by default."""
     return v.check_serving_plan(plan, capacity, list(vendors), list(regions), mode,
-                                gpu_asked, instance_type)
+                                gpu_asked, instance_type, parallelism)
 
 
 def found(findings):
@@ -790,3 +790,15 @@ def test_a_bad_serving_plan_makes_the_aggregate_not_ok():
                         capacity_type="on-demand", regions=["shadeform"],
                         serving_plan=serving(target_rps=None))
     assert not result.ok
+
+
+def test_a_renting_serving_job_must_be_one_pod_and_a_comparing_one_need_not_be():
+    """PACSrun's placement refuses parallelism other than 1 when it rents the plan: the decider
+    answers one machine, and a solve for two pods would reach the actuator with one machine for
+    two pods and fail there."""
+    renting = check_plan(serving(), mode=None, parallelism=2)
+    finding = next(f for f in renting if f.level == v.ERROR)
+    assert finding.code == "serving-plan-parallelism"
+    assert "parallelism is 2" in finding.message
+    assert not [f for f in check_plan(serving(), mode="compare", parallelism=2)
+                if f.level == v.ERROR]

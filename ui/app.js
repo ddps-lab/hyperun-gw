@@ -2397,8 +2397,9 @@ function vendorRules() {
    should not be offered. PACSrun plans a serving plan only on-demand (Shadeform sells nothing
    else) and only for regions [shadeform] (validateServingPlan), and the planner picks the GPUs,
    so spot, a vendor box, a region or a GPU is refused or ignored by the server
-   (check_serving_plan). Capacity is set to on-demand with spot disabled; the vendor boxes, the
-   regions and the GPU are emptied and disabled. Clearing the model gives them all back.
+   (check_serving_plan). Capacity is set to on-demand with spot disabled, parallelism to 1; the
+   vendor boxes, the regions and the GPU are emptied and disabled. Clearing the model gives them
+   all back.
 
    THE MODE IS LEFT ALONE, because it decides whether money is spent and that is the person's
    call: compare ranks the plans and rents nothing, any other mode rents the cheapest plan that
@@ -2418,6 +2419,10 @@ function servingRules() {
     if (on) $(id).value = "";
     $(id).disabled = on;
   });
+  // A rented plan is one machine running one pod, and PACSrun refuses a renting serving job
+  // whose parallelism is not 1 (placement.go, HYPERUN-SHUNTSERVE-EXECUTE).
+  if (on) $("f-parallelism").value = 1;
+  $("f-parallelism").disabled = on;
   vendorRules();
 
   // Folded, the section still sends what is in it, so its summary says so.
@@ -2433,12 +2438,13 @@ function servingRules() {
   }
   const compare = $("f-mode").value === "compare";
   $("f-serve-note").innerHTML = note("info",
-    "Capacity is on-demand and the planner picks Shadeform machines, so vendors, regions and " +
-    "GPU are set aside. " + (compare
+    "Capacity is on-demand, parallelism is 1 and the planner picks Shadeform machines, so " +
+    "vendors, regions and GPU are set aside. " + (compare
       ? "Placement is compare: the planner ranks up to 50 plans and nothing is rented."
       : `Placement is ${$("f-mode").value || "ordered"}: the operator rents the cheapest plan ` +
-        "that runs on one machine and runs this image there, billed by the hour. Choose " +
-        "compare under Placement to see the plans first."));
+        "that runs on one machine and runs this image there, billed by the hour, and tries the " +
+        "next one-machine plan if that rental fails. Choose compare under Placement to see the " +
+        "plans first."));
 }
 
 document.querySelectorAll("#view-submit [data-vendor]")

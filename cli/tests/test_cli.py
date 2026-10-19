@@ -1577,7 +1577,7 @@ def test_a_server_that_does_not_know_serving_plan_is_never_sent_one(fake, capsys
 def test_status_names_the_rented_plan_and_the_cheapest_ranked_one(fake, capsys):
     fake.status_result = {
         "job_id": "job-a8acdef80a07", "name": "serve", "phase": "Running",
-        "serving_plan_chosen": {"rank": 3, "instance_type": "excesssupply_A100_sxm4_80Gx8_2",
+        "serving_plan_chosen": {"rank": 3, "instance_type": "A100_sxm4_80Gx8_2",
                                 "cloud": "excesssupply", "region": "omaha-usa-2",
                                 "cost_per_hour": "10.8000", "throughput_rps": "12.283",
                                 "latency_seconds": "2.042", "attempt": 2},
@@ -1586,7 +1586,7 @@ def test_status_names_the_rented_plan_and_the_cheapest_ranked_one(fake, capsys):
     }
     assert run(["status", "job-a8acdef80a07"]) == cli.EXIT_OK
     out = capsys.readouterr().out
-    assert ("serving    plan 3: excesssupply_A100_sxm4_80Gx8_2 (excesssupply / omaha-usa-2), "
+    assert ("serving    plan 3: A100_sxm4_80Gx8_2 (excesssupply / omaha-usa-2), "
             "$10.8000/h, estimated 12.283 req/s, attempt 2") in out
     assert "1 ranked; the cheapest is $8.0700/h for 2.488 req/s on 5 machine(s)" in out
 
