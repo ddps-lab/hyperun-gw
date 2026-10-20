@@ -1,6 +1,6 @@
 ---
 name: hyperun
-description: Use when someone wants to run a training, fine-tuning or batch GPU job from their own repository and does not have kubectl, a kubeconfig, or a cloud account — building the run.sh, asking what it will cost and how long it will take, checking it before it runs, submitting it, and following it afterwards. Also use for reading back a running job's progress, GPU usage, logs and results.
+description: Use when someone wants to run a training, fine-tuning or batch GPU job from their own repository and does not have kubectl, a kubeconfig, or a cloud account — building the run.sh, asking what it will cost and how long it will take, checking it before it runs, submitting it, and following it afterwards. Also use for reading back a running job's progress, GPU usage, logs and results, and to serve a model behind an OpenAI-compatible endpoint (choosing a supported model, filling its config from config.json, creating the serving within an hourly budget, reading its API key, deleting it).
 ---
 
 # hyperun — someone's repository into a running GPU job
@@ -345,6 +345,92 @@ runs on and why, quoting the note, before anything else. Do the same after every
 restart: a job that recovers can land on another vendor. Keep the vendor in mind for
 what follows -- the price, the terminal, and where the result files come back from all
 depend on it.
+
+## Serving a model behind an endpoint
+
+A **serving** is not a job. A job runs once and ends; a serving rents machines, starts vLLM,
+and **bills by the hour until somebody deletes it**. Use it when the user wants an
+OpenAI-compatible endpoint (`base_url` + API key) for a model, not a batch run.
+
+### 1. Pick the model with the server, not from memory
+
+```bash
+hyperun serving-models     # the presets, the dense families that plan correctly, the pick
+```
+
+If the user names no model, **recommend what `serving-models` recommends** and say why in its
+words. If they name one, it must be a dense decoder of one of the listed families (Llama 3.x,
+Qwen2.5, Qwen3 dense, Mistral dense). A mixture-of-experts model is refused, and so is any
+other architecture: do not argue with the refusal, pass it on and offer a listed family.
+
+### 2. Get the model's numbers: ask the server, or read config.json yourself
+
+A serving's `spec.model.config` holds the eight numbers the planner prices a model by. For a
+preset the server fills them. For anything else, **one of these two, never a guess**:
+
+```bash
+hyperun model-config Qwen/Qwen3-8B                       # an HF id (optionally --revision)
+hyperun model-config https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json
+hyperun model-config meta-llama/Llama-3.1-8B-Instruct --hf-token-secret HF_TOKEN   # gated
+```
+
+The answer's `config` goes into `model.config` of the create body unchanged; `spec_config`
+is the same block in the CRD's camelCase if you are writing the HyperunServing object
+yourself. The route behind it is `POST /v1/model-config`.
+
+If you read `config.json` yourself instead (from the HF id or the URL the user gave), map it
+exactly like this and change nothing else:
+
+| config.json | `spec.model.config` | when it is missing |
+|---|---|---|
+| `architectures[0]` | `architecture` | refuse: not a usable config |
+| `hidden_size` | `hiddenSize` | refuse |
+| `num_hidden_layers` | `numLayers` | refuse |
+| `num_attention_heads` | `numAttentionHeads` | refuse |
+| `num_key_value_heads` | `numKeyValueHeads` | equals `num_attention_heads` |
+| `head_dim` | `headDim` | `hidden_size / num_attention_heads`; **if it is present, keep it** (Qwen3-4B: 128, not 2560/32 = 80) |
+| `intermediate_size` | `intermediateSize` | refuse |
+| `vocab_size` | `vocabSize` | refuse |
+| `torch_dtype` (or `dtype`) | `dtype` | leave empty |
+
+**Refuse a mixture of experts yourself** if any of `num_experts`, `num_local_experts`,
+`n_routed_experts`, `num_experts_per_tok`, `moe_intermediate_size` has a value. A config whose
+numbers sit under `text_config` is a multimodal model and is not one of the families.
+
+A gated repository (every `meta-llama/*`) answers the server with `[model-config-gated]` when
+no token is named. The user registers one themselves, exactly as in Step 0:
+`hyperun secret-set HF_TOKEN`, after accepting the model's licence on Hugging Face. You pass
+the NAME (`--hf-token-secret HF_TOKEN`), never the value.
+
+### 3. Create it, and say what it costs before you do
+
+`--hourly-budget` is required and it is a RATE: dollars per hour for all machines together.
+**Before running `serving-create`, tell the user the ceiling in their terms: budget x 24 a day,
+with no end until they delete it** (or `--max-spend` dollars in total, if they want a cap).
+
+```bash
+hyperun serving-create chat-8b --preset llama-3.1-8b --hourly-budget 3
+hyperun serving-create qwen --model Qwen/Qwen3-8B --hourly-budget 2.5 --max-spend 40
+hyperun serving-create -f serving.yaml          # a body with model.config already filled
+```
+
+`--avg-input-tokens` and `--avg-output-tokens` default to 763 and 232 (ShuntServe's own
+workload); ask the user only if their traffic is clearly different. There is no target request
+rate: the planner ranks plans by requests per second per dollar-hour within the budget, and
+rank 1 is the best value, not the cheapest.
+
+### 4. Follow it, connect to it, stop it
+
+```bash
+hyperun serving-status chat-8b     # phase, the chosen machines, score, catalog, billing line
+hyperun serving-key chat-8b        # OPENAI_BASE_URL=... and OPENAI_API_KEY=...
+hyperun serving-delete chat-8b     # machines given back, billing stops, the key stops working
+```
+
+The endpoint answers 503 until `serving-status` says ready. **The API key is the user's, like
+a password: do not paste it into files you write or commit.** Hand them the `serving-key`
+command and let them put the two values where their client reads them. Their hyperun login
+does not open the endpoint; only the serving's key does.
 
 ## The researcher's own documents
 
