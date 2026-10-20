@@ -119,7 +119,7 @@ subjects:
   # nothing to anybody, and the gateway could not read a single job there. The working
   # namespaces had been fixed BY HAND during the migration, so nothing showed it until a new
   # tenant was onboarded. Checked against the live cluster:
-  #     kubectl get rolebinding hyperun-gw -n ddps-ljk8540009 -o jsonpath='{.subjects}'
+  #     kubectl get rolebinding hyperun-gw -n <tenant-namespace> -o jsonpath='{.subjects}'
   #     [{"kind":"ServiceAccount","name":"hyperun-gw","namespace":"hyperun-system"}]
   - kind: ServiceAccount
     name: hyperun-gw
