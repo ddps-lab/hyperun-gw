@@ -32,6 +32,13 @@ hyperun <command> [options]
 | `hyperun watch` | GPU usage and training progress |
 | `hyperun stats` | what your team has spent |
 | `hyperun logs` | a job's output |
+| `hyperun serving-models` | which models a serving can use, and which one to start with |
+| `hyperun model-config` | read a model's config.json and print the numbers a serving needs |
+| `hyperun serving-create` | serve a model behind an endpoint; it bills by the hour until you delete it |
+| `hyperun servings` | your servings, and whether each is up |
+| `hyperun serving-status` | one serving: phase, plans, the chosen machines, the endpoint |
+| `hyperun serving-delete` | delete a serving; its machines are given back and billing stops |
+| `hyperun serving-key` | print a serving's endpoint URL and API key |
 
 ## hyperun login
 
@@ -267,6 +274,72 @@ Aggregate only. Being on a team does not let you read a member's jobs.
 | `job_id` | yes |  |
 | `-f`, `--follow` |  | keep printing as new lines arrive. The server cannot stream, so this asks again every few seconds and prints what is new. |
 | `--interval SECONDS` |  | how often to ask, with --follow (default 6) (default `6.0`) |
+
+## hyperun serving-models
+
+The planner's presets with their numbers, the dense model families known to plan correctly, and a recommendation. Asks the server; nothing is created.
+
+## hyperun model-config
+
+The server reads config.json from Hugging Face (or the URL you give) and answers the model's structure, or says why it cannot be planned: a mixture-of-experts model, an unsupported architecture, a missing number, or a gated repository without a token. Nothing is created.
+
+| argument | required | what it does |
+|---|---|---|
+| `model` | yes | a Hugging Face id (Qwen/Qwen3-8B) or an https URL to a config.json |
+| `--revision REVISION` |  | a branch, tag or commit of the id |
+| `--hf-token-secret NAME` |  | the NAME of a token you registered with `secret-set` (e.g. HF_TOKEN), for a gated repository. The value is read on the server and sent to huggingface.co only. |
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
+
+## hyperun serving-create
+
+Creates a serving. The planner ranks plans by requests per second per dollar-hour within --hourly-budget, the operator rents the best one and starts vLLM, and the endpoint answers once `serving-status` says ready. ★ IT KEEPS BILLING UNTIL `serving-delete` (or --max-spend). Give exactly one of --preset, --model and --config-url, or a file with -f; flags win over the file.
+
+| argument | required | what it does |
+|---|---|---|
+| `name` | yes | lowercase letters, digits and '-', at most 40; part of the endpoint URL |
+| `-f PATH`, `--file PATH` |  | a YAML or JSON body, as POST /v1/servings takes it |
+| `--preset PRESET` |  | llama-3.1-8b or llama-3.1-70b; see `serving-models` |
+| `--model HF_ID` |  | a Hugging Face id, e.g. Qwen/Qwen3-8B; its config.json is read on the server |
+| `--revision REVISION` |  | a branch, tag or commit of --model |
+| `--config-url URL` |  | an https URL to the model's config.json |
+| `--hourly-budget USD` |  | REQUIRED: the most the plan may cost, US dollars PER HOUR for all its machines |
+| `--avg-input-tokens N` |  | average prompt length of the traffic (default 763) |
+| `--avg-output-tokens N` |  | average answer length of the traffic (default 232) |
+| `--max-spend USD` |  | stop the serving after this many dollars in total |
+| `--image IMAGE` |  | the vLLM image; default is the operator's |
+| `--hf-token-secret NAME` |  | the NAME of a registered Hugging Face token (e.g. HF_TOKEN), for a gated model |
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
+
+## hyperun servings
+
+| argument | required | what it does |
+|---|---|---|
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
+
+## hyperun serving-status
+
+| argument | required | what it does |
+|---|---|---|
+| `name` | yes |  |
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
+
+## hyperun serving-delete
+
+Deletes the HyperunServing. The operator gives back every machine it rented, and the endpoint stops answering. The API key goes with it.
+
+| argument | required | what it does |
+|---|---|---|
+| `name` | yes |  |
+| `--yes`, `-y` |  | skip the confirmation. For scripts. |
+
+## hyperun serving-key
+
+Reads the serving's API key, which an OpenAI client sends as `Authorization: Bearer`. It is printed, so treat the terminal like a password field.
+
+| argument | required | what it does |
+|---|---|---|
+| `name` | yes |  |
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
 
 ## Exit codes
 

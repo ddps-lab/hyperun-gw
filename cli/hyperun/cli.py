@@ -33,6 +33,10 @@ THE COMMANDS, AND WHY EACH EXISTS
   stats             what your team has spent. Aggregate only: being on a team
                     does not let you read a member's jobs.
   logs              output, optionally followed.
+  servings, serving-create / -status / -delete / -key, serving-models, model-config
+                    a model served behind an OpenAI-compatible endpoint
+                    (HYPERUN-SERVING): create it within an hourly budget, read
+                    its plans and its endpoint, print its API key, delete it.
 
 WHAT IS NOT HERE. No `gpus`. Answering it needs a vendor API key in the server
 and a catalogue cache, and a CLI that answered it locally would be the second
@@ -474,6 +478,93 @@ def build_parser() -> argparse.ArgumentParser:
         "--interval", type=float, default=6.0, metavar="SECONDS",
         help="how often to ask, with --follow (default 6)",
     )
+
+    # HYPERUN-SERVING. A model behind an OpenAI-compatible endpoint. Flat names, the way
+    # `secrets` / `secret-set` / `secret-rm` are: the reference generator
+    # (agent/scripts/generate_references.py) walks ONE level of subcommands, so a nested
+    # `serving create` would be missing from cli.md.
+    sub.add_parser(
+        "serving-models", help="which models a serving can use, and which one to start with",
+        description="The planner's presets with their numbers, the dense model families known "
+        "to plan correctly, and a recommendation. Asks the server; nothing is created.",
+    )
+    model_config = sub.add_parser(
+        "model-config", help="read a model's config.json and print the numbers a serving needs",
+        description="The server reads config.json from Hugging Face (or the URL you give) and "
+        "answers the model's structure, or says why it cannot be planned: a mixture-of-experts "
+        "model, an unsupported architecture, a missing number, or a gated repository without a "
+        "token. Nothing is created.",
+    )
+    model_config.add_argument(
+        "model", help="a Hugging Face id (Qwen/Qwen3-8B) or an https URL to a config.json")
+    model_config.add_argument("--revision", help="a branch, tag or commit of the id")
+    model_config.add_argument(
+        "--hf-token-secret", metavar="NAME",
+        help="the NAME of a token you registered with `secret-set` (e.g. HF_TOKEN), for a "
+        "gated repository. The value is read on the server and sent to huggingface.co only.")
+    add_json_flag(model_config)
+
+    serving_create = sub.add_parser(
+        "serving-create", help="serve a model behind an endpoint; it bills by the hour until "
+        "you delete it",
+        description="Creates a serving. The planner ranks plans by requests per second per "
+        "dollar-hour within --hourly-budget, the operator rents the best one and starts vLLM, "
+        "and the endpoint answers once `serving-status` says ready. ★ IT KEEPS BILLING UNTIL "
+        "`serving-delete` (or --max-spend). Give exactly one of --preset, --model and "
+        "--config-url, or a file with -f; flags win over the file.",
+    )
+    serving_create.add_argument(
+        "name", nargs="?",
+        help="lowercase letters, digits and '-', at most 40; part of the endpoint URL")
+    serving_create.add_argument("-f", "--file", metavar="PATH",
+                                help="a YAML or JSON body, as POST /v1/servings takes it")
+    serving_create.add_argument("--preset", help="llama-3.1-8b or llama-3.1-70b; see "
+                                "`serving-models`")
+    serving_create.add_argument("--model", metavar="HF_ID",
+                                help="a Hugging Face id, e.g. Qwen/Qwen3-8B; its config.json "
+                                "is read on the server")
+    serving_create.add_argument("--revision", help="a branch, tag or commit of --model")
+    serving_create.add_argument("--config-url", metavar="URL",
+                                help="an https URL to the model's config.json")
+    serving_create.add_argument(
+        "--hourly-budget", type=float, metavar="USD",
+        help="REQUIRED: the most the plan may cost, US dollars PER HOUR for all its machines")
+    serving_create.add_argument("--avg-input-tokens", type=int, metavar="N",
+                                help="average prompt length of the traffic (default 763)")
+    serving_create.add_argument("--avg-output-tokens", type=int, metavar="N",
+                                help="average answer length of the traffic (default 232)")
+    serving_create.add_argument("--max-spend", type=float, metavar="USD",
+                                help="stop the serving after this many dollars in total")
+    serving_create.add_argument("--image", help="the vLLM image; default is the operator's")
+    serving_create.add_argument(
+        "--hf-token-secret", metavar="NAME",
+        help="the NAME of a registered Hugging Face token (e.g. HF_TOKEN), for a gated model")
+    add_json_flag(serving_create)
+
+    servings_list = sub.add_parser("servings", help="your servings, and whether each is up")
+    add_json_flag(servings_list)
+
+    serving_status = sub.add_parser(
+        "serving-status", help="one serving: phase, plans, the chosen machines, the endpoint")
+    serving_status.add_argument("name")
+    add_json_flag(serving_status)
+
+    serving_delete = sub.add_parser(
+        "serving-delete", help="delete a serving; its machines are given back and billing stops",
+        description="Deletes the HyperunServing. The operator gives back every machine it "
+        "rented, and the endpoint stops answering. The API key goes with it.",
+    )
+    serving_delete.add_argument("name")
+    serving_delete.add_argument("--yes", "-y", action="store_true",
+                                help="skip the confirmation. For scripts.")
+
+    serving_key = sub.add_parser(
+        "serving-key", help="print a serving's endpoint URL and API key",
+        description="Reads the serving's API key, which an OpenAI client sends as "
+        "`Authorization: Bearer`. It is printed, so treat the terminal like a password field.",
+    )
+    serving_key.add_argument("name")
+    add_json_flag(serving_key)
 
     return parser
 
@@ -1638,6 +1729,180 @@ def cmd_logs(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+# ------------------------------------------------------------------ HYPERUN-SERVING
+#
+# The serving commands. Each is one request; the server owns every judgement (which model is
+# allowed, whether a budget is valid, which plan is rented), so nothing here checks a value.
+
+
+def cmd_serving_models(args: argparse.Namespace) -> int:
+    """Print the presets, the supported families and the recommendation."""
+    answer = client_from_config().serving_models()
+    print("presets (the planner carries their numbers):")
+    for preset in answer.get("presets") or []:
+        gated = ", gated: needs a Hugging Face token" if preset.get("gated") else ""
+        print(f"  {preset['preset']:<15} {preset['name']}{gated}")
+    print("\ndense families known to plan correctly (give the id with --model):")
+    for family in answer.get("families") or []:
+        print(f"  {family['family']:<15} {family['architecture']:<20} e.g. {family['example']}")
+    print(f"\nrecommended: {answer.get('recommendation', '')}")
+    print(f"refused: {answer.get('refused', '')}")
+    return EXIT_OK
+
+
+def _model_ask(value: str) -> dict[str, Any]:
+    """An id or a URL, as the server's two fields."""
+    return {"config_url": value} if value.startswith(("https://", "http://")) else {"model": value}
+
+
+def cmd_model_config(args: argparse.Namespace) -> int:
+    """Print a model's config numbers, or the server's refusal (exit 1)."""
+    body = _model_ask(args.model)
+    if args.revision:
+        body["revision"] = args.revision
+    if args.hf_token_secret:
+        body["hf_token_secret"] = args.hf_token_secret
+    answer = client_from_config().model_config(body)
+    if args.json:
+        print(json.dumps(answer, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    print(f"{answer.get('name') or answer.get('config_source')}  ({answer.get('family')})")
+    for key, value in (answer.get("config") or {}).items():
+        print(f"  {key:<20} {value}")
+    for note in answer.get("notes") or []:
+        print(f"  note: {note}")
+    print(f"\nread from {answer.get('config_source')}")
+    return EXIT_OK
+
+
+def build_serving_body(args: argparse.Namespace) -> dict[str, Any]:
+    """The POST /v1/servings body from -f and the flags; a flag wins over the file's field."""
+    body: dict[str, Any] = load_job_file(args.file) if args.file else {}
+    if args.name:
+        body["name"] = args.name
+    model = dict(body.get("model") or {})
+    for flag, field in (("preset", "preset"), ("model", "name"), ("revision", "revision"),
+                        ("config_url", "config_url")):
+        value = getattr(args, flag, None)
+        if value is not None:
+            model[field] = value
+    if model:
+        body["model"] = model
+    for flag, field in (("hourly_budget", "hourly_budget"), ("avg_input_tokens",
+                        "avg_input_tokens"), ("avg_output_tokens", "avg_output_tokens"),
+                        ("max_spend", "max_spend_usd"), ("image", "image"),
+                        ("hf_token_secret", "hf_token_secret")):
+        value = getattr(args, flag, None)
+        if value is not None:
+            body[field] = value
+    if not body.get("name"):
+        raise SystemExit("a serving needs a name: `hyperun serving-create <name> ...`")
+    return body
+
+
+def _serving_url(client: Any, view: dict[str, Any]) -> str:
+    """The OpenAI base_url: the server this CLI talks to, then the serving's endpoint path."""
+    return client.server + ((view.get("endpoint") or {}).get("path") or "")
+
+
+def cmd_serving_create(args: argparse.Namespace) -> int:
+    """Create a serving and say what it will cost and where it will answer."""
+    client = client_from_config()
+    view = client.create_serving(build_serving_body(args))
+    if args.json:
+        print(json.dumps(view, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    print(f"created serving {view['name']}")
+    print(f"  endpoint   {_serving_url(client, view)}  (answers once ready; "
+          f"`hyperun serving-status {view['name']}`)")
+    if view.get("billing"):
+        print(f"  billing    {view['billing']}")
+    print(f"  stop it    hyperun serving-delete {view['name']}")
+    return EXIT_OK
+
+
+def cmd_servings(args: argparse.Namespace) -> int:
+    """List this caller's servings."""
+    answer = client_from_config().servings()
+    if args.json:
+        print(json.dumps(answer, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    rows = answer.get("servings") or []
+    if not rows:
+        print("no servings. `hyperun serving-create` starts one.")
+        return EXIT_OK
+    for view in rows:
+        chosen = view.get("serving_plan_chosen") or {}
+        rate = f"${chosen['cost_per_hour']}/h" if chosen.get("cost_per_hour") else "-"
+        ready = "ready" if (view.get("endpoint") or {}).get("ready") else "not ready"
+        model = (view.get("model") or {}).get("name", "")
+        print(f"{view['name']:<24} {view.get('phase') or 'accepted':<12} {ready:<10} "
+              f"{rate:<12} {model}")
+    return EXIT_OK
+
+
+def cmd_serving_status(args: argparse.Namespace) -> int:
+    """Print one serving's state, the plan it rents and where it answers."""
+    client = client_from_config()
+    view = client.serving(args.name)
+    if args.json:
+        print(json.dumps(view, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    model = view.get("model") or {}
+    endpoint = view.get("endpoint") or {}
+    print(f"{view['name']}  {model.get('name', '')}")
+    print(f"  phase      {view.get('phase') or 'accepted, not yet started'}")
+    print(f"  endpoint   {_serving_url(client, view)}  "
+          f"({'ready' if endpoint.get('ready') else 'not ready yet'})")
+    chosen = view.get("serving_plan_chosen")
+    if chosen:
+        score = f", score {chosen['score']}" if chosen.get("score") else ""
+        print(f"  plan       rank {chosen.get('rank')}: ${chosen.get('cost_per_hour')}/h, "
+              f"estimated {chosen.get('throughput_rps')} req/s{score}, attempt "
+              f"{chosen.get('attempt')}")
+        for stage in chosen.get("stages") or []:
+            print(f"    machine  {stage.get('instance_type')} ({stage.get('cloud')} / "
+                  f"{stage.get('region')}), {stage.get('layers')} layers, TP {stage.get('tp')}")
+    plans = view.get("serving_plans") or []
+    if plans:
+        best = plans[0]
+        print(f"  plans      {len(plans)} ranked by score; rank 1 is ${best.get('cost_per_hour')}"
+              f"/h for {best.get('throughput_rps')} req/s. --json lists them all")
+    if view.get("serving_catalog"):
+        print(f"  catalog    {view['serving_catalog']}")
+    if view.get("billing"):
+        print(f"  billing    {view['billing']}")
+    if view.get("message"):
+        print(f"  message    {view['message']}")
+    return EXIT_OK
+
+
+def cmd_serving_delete(args: argparse.Namespace) -> int:
+    """Delete a serving, asking first unless --yes."""
+    if not args.yes:
+        answer = input(f"delete serving {args.name}? its machines are given back, its endpoint "
+                       f"and API key stop working [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("left alone")
+            return EXIT_USAGE
+    client_from_config().delete_serving(args.name)
+    print(f"deleted serving {args.name}")
+    return EXIT_OK
+
+
+def cmd_serving_key(args: argparse.Namespace) -> int:
+    """Print the endpoint and its API key, in the two names OpenAI's SDKs read."""
+    client = client_from_config()
+    answer = client.serving_key(args.name)
+    base_url = client.server + answer.get("endpoint_path", "")
+    if args.json:
+        print(json.dumps({**answer, "base_url": base_url}, indent=2))
+        return EXIT_OK
+    print(f"OPENAI_BASE_URL={base_url}")
+    print(f"OPENAI_API_KEY={answer['api_key']}")
+    return EXIT_OK
+
+
 COMMANDS = {
     "login": cmd_login,
     "delete": cmd_delete,
@@ -1659,6 +1924,13 @@ COMMANDS = {
     "watch": cmd_watch,
     "stats": cmd_stats,
     "logs": cmd_logs,
+    "serving-models": cmd_serving_models,
+    "model-config": cmd_model_config,
+    "serving-create": cmd_serving_create,
+    "servings": cmd_servings,
+    "serving-status": cmd_serving_status,
+    "serving-delete": cmd_serving_delete,
+    "serving-key": cmd_serving_key,
 }
 
 

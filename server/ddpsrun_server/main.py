@@ -2386,7 +2386,7 @@ def create_serving(body: ServingRequest, request: Request,
         raise HTTPException(
             status_code=409,
             detail=f"a serving named {body.name} already exists in your namespace. Delete it "
-                   f"with `hyperun serving delete {body.name}` or choose another name.") from None
+                   f"with `hyperun serving-delete {body.name}` or choose another name.") from None
     except ClusterError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.info("serving %s created for %s in %s", body.name, principal.user,

@@ -269,7 +269,7 @@ async def handle(request: Request, cluster: Any, lookups: Lookups, namespace: st
     if not presented:
         return error(401, "missing_api_key",
                      "Send this serving's API key as `Authorization: Bearer <key>`. Its owner "
-                     "reads it with `hyperun serving key` or the Servings page.")
+                     "reads it with `hyperun serving-key` or the Servings page.")
     try:
         obj = await lookups.serving(cluster, namespace, name)
     except NotFound:

@@ -173,7 +173,7 @@ def test_a_name_that_exists_is_a_409(client, cluster):
     seed(cluster)
     response = as_alice(client, "POST", "/v1/servings", json=PRESET_BODY)
     assert response.status_code == 409
-    assert "hyperun serving delete chat-8b" in response.json()["detail"]
+    assert "hyperun serving-delete chat-8b" in response.json()["detail"]
 
 
 def test_creating_needs_a_login(client, cluster):
