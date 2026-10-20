@@ -33,6 +33,7 @@ Authorization: Bearer <your token>
 | POST | `/v1/jobs/{job_id}/stop` | Pause a running job, keeping its machine — or let it run again. |
 | GET | `/v1/login-config` | Where to send someone to sign in. |
 | GET | `/v1/metrics/query` | Ask the in-cluster Prometheus one instant query. |
+| POST | `/v1/model-config` | Read a model's config.json and return the numbers a serving's spec.model.config takes. |
 | GET | `/v1/namespaces` | Which namespaces this caller may read — the screen's namespace picker. |
 | GET | `/v1/prices` | What every GPU the catalogue knows costs, in every region it prices. |
 | POST | `/v1/register-request` | Ask an operator to give this signed-in address a namespace. |
@@ -41,6 +42,14 @@ Authorization: Bearer <your token>
 | GET | `/v1/secrets` | Which names a job may put in `secrets` — the names only. |
 | DELETE | `/v1/secrets/{name}` | Forget one registered name in your namespace. |
 | PUT | `/v1/secrets/{name}` | Register one value under one name, for jobs in your own namespace. |
+| GET | `/v1/serving-models` | Which models a serving can be planned for. HYPERUN-MODEL-CONFIG. |
+| GET | `/v1/servings` | This caller's servings, newest first (HYPERUN-OWNER-GATE filters namespace-mates'). |
+| POST | `/v1/servings` | Serve a model behind an OpenAI-compatible endpoint. HYPERUN-SERVING. |
+| DELETE | `/v1/servings/{name}` | Delete a serving. The operator watches for it and gives back every machine it rented; |
+| GET | `/v1/servings/{name}` | One serving: phase, ranked plans, the chosen plan's machines, the endpoint path. |
+| GET | `/v1/servings/{name}/api-key` | The endpoint's API key, read from the Secret the operator created. HYPERUN-SERVING-KEY. |
+| GET | `/v1/servings/{ns}/{name}/v1/{path}` | The serving's OpenAI-compatible endpoint. HYPERUN-SERVING-PROXY. |
+| POST | `/v1/servings/{ns}/{name}/v1/{path}` | The serving's OpenAI-compatible endpoint. HYPERUN-SERVING-PROXY. |
 | GET | `/v1/stats` | What this caller's team has spent. |
 | GET | `/v1/usage` | Who spent what, day by day, across every namespace. Operators only. |
 | POST | `/v1/validate` | Check a job without running it. |
@@ -413,6 +422,47 @@ What /v1/jobs/{id}/metrics returns.
 | `sample_count` |  | How many readings the lowest-indexed card printed in the window. `len(gpu_series)` is not that number -- the series is thinned to at most 400 points for drawing -- and the screen printed the thinned one as 'N samples'. |
 | `window_seconds` | yes | How far back the log was read. Older readings are still in the log; ask for a bigger window to see them. |
 
+### ModelConfigBody
+
+The contract's `spec.model.config`, in this API's snake_case.
+
+| field | required | description |
+|---|---|---|
+| `architecture` | yes | config.json's architectures[0], e.g. LlamaForCausalLM. One of the dense families GET /v1/serving-models lists. |
+| `dtype` |  | config.json's torch_dtype, e.g. bfloat16. |
+| `head_dim` | yes |  |
+| `hidden_size` | yes |  |
+| `intermediate_size` | yes |  |
+| `num_attention_heads` | yes |  |
+| `num_key_value_heads` | yes |  |
+| `num_layers` | yes | config.json's num_hidden_layers. |
+| `vocab_size` | yes |  |
+
+### ModelConfigRequest
+
+The body of `POST /v1/model-config`.
+
+| field | required | description |
+|---|---|---|
+| `config_url` |  | A URL to a config.json, instead of `model`. https only, public addresses only. |
+| `hf_token_secret` |  | The NAME of a registered value holding a Hugging Face token (e.g. HF_TOKEN), for a gated repository. Sent to huggingface.co only. |
+| `model` |  | A Hugging Face repository id, e.g. Qwen/Qwen3-8B. |
+| `revision` |  | A branch, tag or commit. |
+
+### ModelConfigResponse
+
+What `POST /v1/model-config` returns: the model's structure, or a 422 saying why not.
+
+| field | required | description |
+|---|---|---|
+| `config` | yes | snake_case; pass it as model.config to POST /v1/servings. |
+| `config_source` | yes | The URL that was read. |
+| `family` | yes | Which supported dense family it belongs to. |
+| `name` | yes | The HF id, "" for a URL that is not huggingface.co. |
+| `notes` |  | What was derived rather than read, and what the planner may get wrong for this model. |
+| `revision` |  |  |
+| `spec_config` | yes | The same numbers in the camelCase shape HyperunServing's spec.model.config takes, for an agent writing the object itself. |
+
 ### MonitorFindingView
 
 One thing an automated check decided is wrong with a RUNNING job.
@@ -559,6 +609,59 @@ What `GET /v1/jobs/{id}/serving-check` returns. HYPERUN-SERVING-CHECK-ROUTE.
 | `name` |  | The file read, relative to the result path. |
 | `note` |  | Why nothing was found, when it was not. |
 
+### ServingChosenView
+
+status.servingPlanChosen of a serving: the plan it rents, with every machine of it.
+
+| field | required | description |
+|---|---|---|
+| `attempt` |  | How many plans this serving has chosen, this one included. |
+| `cost_per_hour` |  | US dollars per hour, every machine together. |
+| `latency_seconds` |  | The planner's estimate. |
+| `rank` | yes | Its rank in `serving_plans`. |
+| `score` |  | Requests per second per dollar-hour, why it was chosen over the later ranks. |
+| `stages` |  |  |
+| `throughput_rps` |  | The planner's estimate. |
+
+### ServingEndpointView
+
+Where to send OpenAI requests, and whether anything answers there yet.
+
+| field | required | description |
+|---|---|---|
+| `path` | yes | Append to the gateway's address: <server><path> is the OpenAI base_url. Authenticate with the serving's API key as `Authorization: Bearer`, read once from GET /v1/servings/{name}/api-key. |
+| `ready` |  | True when the operator says vLLM answers. Until then the path answers 503. |
+
+### ServingKeyResponse
+
+What `GET /v1/servings/{name}/api-key` returns. Shown once; never cached.
+
+| field | required | description |
+|---|---|---|
+| `api_key` | yes | Send as `Authorization: Bearer <api_key>` to the endpoint path. Treat it like a password. |
+| `endpoint_path` | yes |  |
+
+### ServingListResponse
+
+What `GET /v1/servings` returns.
+
+| field | required | description |
+|---|---|---|
+| `servings` | yes |  |
+| `total` | yes |  |
+
+### ServingModelRequest
+
+Which model. One of: `preset`; `name` (an HF id); `config_url`; or `name` with `config`.
+
+| field | required | description |
+|---|---|---|
+| `config` |  | The model's structure, filled by the caller (e.g. from POST /v1/model-config, or by reading config.json yourself). Needs `name`. |
+| `config_url` |  | A URL to a config.json, instead of reading it by `name`. A huggingface.co URL also gives the id and the revision; any other URL needs `name` as well, because vLLM loads weights by id. |
+| `name` |  | The Hugging Face repository id vLLM loads, e.g. Qwen/Qwen3-8B. Without `config`, the server reads its config.json (POST /v1/model-config shows what it would find). |
+| `preset` |  | A preset the planner carries: llama-3.1-8b, llama-3.1-70b. Fills the HF id and the config itself. |
+| `revision` |  | A branch, tag or commit of `name`. |
+
 ### ServingPipelineView
 
 One copy of the model, its layers split in order across its stages' machines.
@@ -615,6 +718,33 @@ One rental plan from status.servingPlans.
 | `score` |  | ShuntServe's score, the number the ranks are sorted by: throughput_rps / cost_per_hour, requests per second per dollar-hour, as the planner computed it. Null from an operator that does not write it. |
 | `throughput_rps` |  | The planner's estimate, requests per second: the sum of its pipelines'. |
 
+### ServingRequest
+
+The body of `POST /v1/servings`.
+
+| field | required | description |
+|---|---|---|
+| `avg_input_tokens` |  | Average prompt length of the traffic, in tokens. Default 763, ShuntServe's own workload. |
+| `avg_output_tokens` |  | Average answer length of the traffic, in tokens. Default 232. |
+| `hf_token_secret` |  | The NAME of a value you registered with `hyperun secret-set` (e.g. HF_TOKEN) holding a Hugging Face token, for a gated model. The value never travels through this API: the server reads config.json with it, and the operator hands it to vLLM to download the weights. |
+| `hourly_budget` |  | REQUIRED. The most the served plan may cost, US dollars PER HOUR for all its machines together, e.g. 3.00. The planner ranks plans by requests per second per dollar-hour among those within it. The serving bills by the hour until it is deleted. |
+| `image` |  | The vLLM image. Leave it out for the operator's default. |
+| `max_spend_usd` |  | Optional. Total US dollars after which the operator stops the serving. |
+| `model` | yes |  |
+| `name` | yes | The serving's name: lowercase letters, digits and '-', starting with a letter, at most 40 characters. It is part of the endpoint URL /v1/servings/<namespace>/<name>/v1, so it must be unique in your namespace. |
+
+### ServingStageChosenView
+
+One machine of the chosen plan: where it is rented and which layers it runs.
+
+| field | required | description |
+|---|---|---|
+| `cloud` |  | The provider behind Shadeform, e.g. hyperstack. |
+| `instance_type` |  | The Shadeform instance type, e.g. A100_80G. |
+| `layers` |  | How many consecutive model layers it holds. |
+| `region` |  | The Shadeform region. |
+| `tp` |  | Tensor-parallel size: the machine's GPU count. |
+
 ### ServingStageView
 
 One machine of a pipeline, and the layers it runs.
@@ -626,6 +756,31 @@ One machine of a pipeline, and the layers it runs.
 | `price_per_hour` |  | US dollars per hour. |
 | `tp` | yes | Tensor-parallel size, which is the machine's GPU count. |
 | `zone` |  | The Shadeform region it is sold in. |
+
+### ServingView
+
+What `GET /v1/servings/{name}` returns.
+
+| field | required | description |
+|---|---|---|
+| `avg_input_tokens` |  |  |
+| `avg_output_tokens` |  |  |
+| `billing` |  | What this serving costs while it exists, in one sentence. |
+| `created_at` |  |  |
+| `endpoint` | yes |  |
+| `hourly_budget` |  | US dollars per hour, as sent. |
+| `image` |  |  |
+| `machines` |  | status.machines as the operator writes it, passed through unchanged. |
+| `max_spend_usd` |  |  |
+| `message` |  |  |
+| `model` |  | name, revision, preset, config_source and config (snake_case), from spec.model. |
+| `name` | yes |  |
+| `namespace` | yes | Part of the endpoint path, which is why it crosses the API here. |
+| `phase` |  | The operator's phase word, verbatim. Empty until it has looked at the serving once. |
+| `serving_catalog` |  | Which Shadeform catalog the plans were ranked on, and when it was fetched. |
+| `serving_plan_chosen` |  |  |
+| `serving_plans` |  | The ranked plans, highest score (requests per second per dollar-hour) first, every one within the hourly budget. Left OUT of GET /v1/servings. |
+| `user` |  | Who created it. |
 
 ### StatsResponse
 

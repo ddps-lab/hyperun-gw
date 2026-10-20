@@ -41,6 +41,13 @@ class FakeCluster:
         self.secrets_forbidden: set[str] = set()
         # HYPERUN-SECRET-EXPIRY. (namespace, name) -> ISO-8601 string.
         self.expiries: dict[tuple[str, str], str] = {}
+        # HYPERUN-SERVING. (namespace, name) -> HyperunServing, and (namespace, serving name)
+        # -> the API key the operator would have put in <name>-api-key. Every read of a key
+        # is counted, so a test can assert the proxy's cache spared the apiserver.
+        self.servings: dict[tuple[str, str], dict] = {}
+        self.serving_keys: dict[tuple[str, str], str] = {}
+        self.key_reads = 0
+        self.serving_reads = 0
 
     def user_secrets(self, namespace):
         # ★ THE EMPTY CASE GOES THROUGH THE SAME BRANCH THE REAL CLIENT TAKES.
@@ -93,6 +100,47 @@ class FakeCluster:
         # The patch itself is the no-op the API server performs; the guard above
         # is what turns it into an answer.
         del self.secrets[namespace][name]
+
+    # ------------------------------------------------------------ HYPERUN-SERVING
+    # Each mirrors the real method's branches (k8s.Cluster), including the ones a route turns
+    # into a status code: Conflict on an existing name, NotFound for no object, no Secret, or
+    # no `api-key` entry. tests/test_k8s.py drives the real methods through the same branches.
+
+    def create_serving(self, namespace, body):
+        name = body["metadata"]["name"]
+        if (namespace, name) in self.servings:
+            raise k8s.Conflict(name)
+        stored = {**body, "metadata": {**body["metadata"],
+                                       "creationTimestamp": "2026-10-20T00:00:00Z"}}
+        self.servings[(namespace, name)] = stored
+        return stored
+
+    def get_serving(self, namespace, name):
+        self.serving_reads += 1
+        try:
+            return self.servings[(namespace, name)]
+        except KeyError:
+            raise k8s.NotFound(name) from None
+
+    def list_servings(self, namespace):
+        return [obj for (ns, _), obj in self.servings.items() if ns == namespace]
+
+    def delete_serving(self, namespace, name):
+        if self.servings.pop((namespace, name), None) is None:
+            raise k8s.NotFound(name)
+
+    def serving_api_key(self, namespace, serving_name):
+        self.key_reads += 1
+        try:
+            return self.serving_keys[(namespace, serving_name)]
+        except KeyError:
+            raise k8s.NotFound(serving_name + "-api-key") from None
+
+    def user_secret_value(self, namespace, name):
+        try:
+            return self.secrets[namespace][name]
+        except KeyError:
+            raise k8s.NotFound(name) from None
 
     def create_job(self, namespace, body):
         self.created.append((namespace, body))

@@ -19,6 +19,12 @@ END-TO-END FLOW of this file:
   6. `recent_log_lines()` reads the same stream WITHOUT redacting, for the
      metrics endpoint, whose whole purpose is to read one of the lines the relay
      masks. See its docstring for why the redaction lives at the point of use.
+  7. HYPERUN-SERVING. `create_serving()`, `get_serving()`, `list_servings()` and
+     `delete_serving()` do for a HyperunServing what the job methods do for a
+     HyperunJob. `serving_api_key()` reads the one Secret per serving the
+     operator creates (`<name>-api-key`), for the endpoint proxy and for the
+     "show API key" route. `user_secret_value()` reads one registered value,
+     for the HF token a gated model's config.json needs.
 
 WHY THE DYNAMIC CLIENT AND NOT GENERATED TYPES. HyperunJob is a CRD, so the Python
 client has no model for it. `CustomObjectsApi` takes and returns plain dicts,
@@ -27,15 +33,25 @@ regenerate when the CRD gains a field.
 
 WHAT THIS SERVER NEEDS PERMISSION TO DO. Its ServiceAccount needs `create`,
 `get` and `list` on `hyperunjobs`, plus `list` on `pods` and `get` on `pods/log`,
-in every tenant namespace. It does NOT need `get` on `secrets`: it writes a
-`secretKeyRef` and lets kubelet do the reading, so a compromise of this server
-does not hand over the GitHub token.
+in every tenant namespace. For a JOB it does NOT need `get` on `secrets`: it
+writes a `secretKeyRef` and lets kubelet do the reading, so a compromise of this
+server does not hand over the GitHub token.
+
+★ A SERVING IS THE EXCEPTION, AND THE PRICE IS WRITTEN DOWN HERE (2026-10-20).
+The endpoint proxy must compare a caller's bearer with the serving's API key, and
+"show API key" must return it, so `serving_api_key` reads `<name>-api-key`.
+RBAC's `resourceNames` cannot say "any name ending in -api-key", so the Role
+that allows it allows `get` on EVERY Secret in the tenant namespace, which
+includes the vendor keys `onboard.sh` copies there. config/deploy/rbac.yaml
+(Role hyperun-gw-serving-keys) carries that grant separately so it can be left
+unapplied, and this code reads exactly one Secret name per serving and one key.
 
 Grep anchor: HYPERUN-K8S
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import Any
@@ -51,6 +67,11 @@ from .config import (
     PACSRUN_SLOT_LABEL,
     PROMETHEUS_NAMESPACE,
     PROMETHEUS_SERVICE,
+    SERVING_API_KEY_KEY,
+    SERVING_API_KEY_SUFFIX,
+    SERVING_GROUP,
+    SERVING_PLURAL,
+    SERVING_VERSION,
     USER_SECRET_NAME,
 )
 
@@ -98,6 +119,10 @@ class NotFound(Exception):
 
 class ClusterError(Exception):
     """kube-apiserver refused or could not be reached. Routes turn this into 502."""
+
+
+class Conflict(Exception):
+    """An object of that name already exists. Routes turn this into HTTP 409."""
 
 
 def redact(line: str) -> str | None:
@@ -318,6 +343,155 @@ class Cluster:
                 return []
             raise ClusterError(_api_message(exc)) from exc
         return list(response.get("items") or [])
+
+    # ------------------------------------------------------------ HYPERUN-SERVING
+
+    def create_serving(self, namespace: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Create one HyperunServing.
+
+        Args:
+            namespace: the caller's namespace, from their token.
+            body: what `servings.to_hyperunserving` produced.
+
+        Returns:
+            The object as the API server stored it.
+
+        Raises:
+            Conflict: a serving of that name exists in that namespace. The name is the
+                caller's (it is part of the endpoint URL), so a clash is theirs to resolve.
+            ClusterError: anything else. A 404 here means the CRD is not installed: the
+                apiserver answers 404 for a resource it does not know, which would otherwise
+                read as "no such serving" on a create.
+        """
+        try:
+            return self._custom.create_namespaced_custom_object(
+                group=SERVING_GROUP, version=SERVING_VERSION, namespace=namespace,
+                plural=SERVING_PLURAL, body=body,
+            )
+        except ApiException as exc:
+            if exc.status == 409:
+                raise Conflict(body.get("metadata", {}).get("name", "")) from exc
+            if exc.status == 404:
+                raise ClusterError(
+                    f"kube-apiserver does not know {SERVING_PLURAL}.{SERVING_GROUP}/"
+                    f"{SERVING_VERSION}: the HyperunServing CRD is not installed on this "
+                    f"cluster yet") from exc
+            raise ClusterError(_api_message(exc)) from exc
+
+    def get_serving(self, namespace: str, name: str) -> dict[str, Any]:
+        """Fetch one HyperunServing by name.
+
+        Raises:
+            NotFound: no serving of that name in that namespace, or the CRD is not installed
+                (both are a 404 from the apiserver, and both mean "nothing to show").
+            ClusterError: anything else.
+        """
+        try:
+            return self._custom.get_namespaced_custom_object(
+                group=SERVING_GROUP, version=SERVING_VERSION, namespace=namespace,
+                plural=SERVING_PLURAL, name=name,
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                raise NotFound(name) from exc
+            raise ClusterError(_api_message(exc)) from exc
+
+    def list_servings(self, namespace: str) -> list[dict[str, Any]]:
+        """Every HyperunServing in one namespace.
+
+        Returns:
+            The objects; empty for a namespace with none, and also when the CRD is not
+            installed yet (404), so the screen's Servings list says "none" rather than failing
+            on a cluster that has not been upgraded.
+
+        Raises:
+            ClusterError: the apiserver refused for another reason. A 403 means the gateway's
+                ClusterRole lacks `list` on hyperunservings (config/deploy/rbac.yaml).
+        """
+        try:
+            response = self._custom.list_namespaced_custom_object(
+                group=SERVING_GROUP, version=SERVING_VERSION, namespace=namespace,
+                plural=SERVING_PLURAL,
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                return []
+            raise ClusterError(_api_message(exc)) from exc
+        return list(response.get("items") or [])
+
+    def delete_serving(self, namespace: str, name: str) -> None:
+        """Delete one HyperunServing. The operator watches for it and gives back what it rented.
+
+        Raises:
+            NotFound: no serving of that name in that namespace.
+            ClusterError: anything else.
+        """
+        try:
+            self._custom.delete_namespaced_custom_object(
+                group=SERVING_GROUP, version=SERVING_VERSION, namespace=namespace,
+                plural=SERVING_PLURAL, name=name,
+            )
+        except ApiException as exc:
+            if exc.status == 404:
+                raise NotFound(name) from exc
+            raise ClusterError(f"could not delete {name}: {exc.reason}") from exc
+
+    def serving_api_key(self, namespace: str, serving_name: str) -> str:
+        """The API key of one serving, read from the Secret the operator created for it.
+
+        HYPERUN-SERVING-KEY. The Secret is `<serving>-api-key` and the key inside it is
+        `api-key` (the operator's contract). Exactly that one name is read; the method takes a
+        SERVING name and builds the Secret name itself, so no caller can aim it at another
+        Secret in the namespace even though the Role would allow it (see the module docstring).
+
+        THE VALUE MUST NOT BE LOGGED, PUT IN AN EXCEPTION, OR KEPT. The proxy hashes it and
+        keeps only the digest; the "show API key" route returns it to the serving's owner and
+        nothing else. `_api_message` reads the apiserver's error body, which never carries a
+        Secret's data.
+
+        Returns:
+            The key, decoded.
+
+        Raises:
+            NotFound: no such Secret yet (the operator has not issued a key), or it has no
+                `api-key` entry.
+            ClusterError: anything else. A 403 means the namespace has no
+                hyperun-gw-serving-keys RoleBinding (config/deploy/rbac.yaml).
+        """
+        secret_name = serving_name + SERVING_API_KEY_SUFFIX
+        try:
+            secret = self._core.read_namespaced_secret(name=secret_name, namespace=namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                raise NotFound(secret_name) from exc
+            raise ClusterError(_api_message(exc)) from exc
+        encoded = (secret.data or {}).get(SERVING_API_KEY_KEY)
+        if not encoded:
+            raise NotFound(f"{secret_name} has no {SERVING_API_KEY_KEY}")
+        return base64.b64decode(encoded).decode("utf-8")
+
+    def user_secret_value(self, namespace: str, name: str) -> str:
+        """One value this namespace registered with `PUT /v1/secrets/{name}`.
+
+        HYPERUN-MODEL-CONFIG. The only caller is the model-config lookup, which sends it as the
+        bearer to huggingface.co when the caller names it for a gated repository. It reads the
+        same Secret `user_secrets` reads, so it needs no new permission. NOT logged, NOT
+        returned, NOT put in an exception message.
+
+        Raises:
+            NotFound: nothing registered under that name.
+            ClusterError: the apiserver refused.
+        """
+        try:
+            secret = self._core.read_namespaced_secret(name=USER_SECRET_NAME, namespace=namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                raise NotFound(name) from exc
+            raise ClusterError(_api_message(exc)) from exc
+        encoded = (secret.data or {}).get(name)
+        if not encoded:
+            raise NotFound(name)
+        return base64.b64decode(encoded).decode("utf-8")
 
     def prometheus_query(self, expr: str, timeout_seconds: int = 10) -> dict:
         """Ask the in-cluster Prometheus one instant query, through the apiserver.

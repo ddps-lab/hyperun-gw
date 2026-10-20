@@ -94,6 +94,22 @@ SERVING A MODEL
   shadeform, one pod on one machine, and /v1/validate refuses anything else by
   name.
 
+SERVING A MODEL BEHIND AN ENDPOINT
+  A serving job above runs your image once. A SERVING stays up behind an
+  OpenAI-compatible endpoint until you delete it, billed by the hour all the
+  while. GET /v1/serving-models lists the presets (llama-3.1-8b, llama-3.1-70b),
+  the dense families known to plan correctly (Llama 3.x, Qwen2.5, Qwen3 dense,
+  Mistral dense) and which one to start with. POST /v1/model-config reads a
+  Hugging Face id's config.json and returns the numbers a serving needs, or
+  says why not (mixture-of-experts, another architecture, a gated repository
+  without a token). POST /v1/servings creates one: {"name", "model": {"preset"}
+  or {"name": "<hf id>"}, "hourly_budget"}, with avg_input_tokens 763 and
+  avg_output_tokens 232 unless you say otherwise. Its page lists the ranked
+  plans and the one rented. Once endpoint.ready is true, point an OpenAI client
+  at <this server> followed by the serving's endpoint.path, with the serving's
+  own API key (GET /v1/servings/<name>/api-key) and not your hyperun login.
+  DELETE /v1/servings/<name> stops it and its billing.
+
 PHASES
   Pending     accepted, nothing bought yet
   Starting    a machine is being obtained and the container is coming up

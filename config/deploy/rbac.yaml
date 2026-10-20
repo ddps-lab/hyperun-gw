@@ -55,6 +55,14 @@ rules:
   - apiGroups: ["hyperun.io"]
     resources: ["hyperunjobs"]
     verbs: ["create", "get", "list", "patch", "delete"]
+  # HYPERUN-SERVING. Create, read, list and delete a HyperunServing: POST/GET/DELETE
+  # /v1/servings. `delete` is how a serving stops billing: the operator watches for the object
+  # going away and gives back its machines, exactly as for a job. `watch` is granted so a later
+  # screen can follow a serving's phase without polling; nothing calls it today. No `patch` or
+  # `update`: a serving is not edited through the gateway, it is deleted and created again.
+  - apiGroups: ["hyperun.io"]
+    resources: ["hyperunservings"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   # Find the pod behind a job, so `/v1/jobs/{id}/logs` knows whose stdout to read.
   # `list` and not `get`: the server looks a pod up by label, never by name.
   - apiGroups: [""]
@@ -113,6 +121,52 @@ subjects:
   # tenant was onboarded. Checked against the live cluster:
   #     kubectl get rolebinding hyperun-gw -n ddps-ljk8540009 -o jsonpath='{.subjects}'
   #     [{"kind":"ServiceAccount","name":"hyperun-gw","namespace":"hyperun-system"}]
+  - kind: ServiceAccount
+    name: hyperun-gw
+    namespace: hyperun-system
+---
+# HYPERUN-SERVING-KEY. What the serving endpoint and "show API key" need: `get` on the Secret
+# `<serving>-api-key` the operator creates beside each HyperunServing (key `api-key`).
+#
+# ★ THIS IS A WIDER GRANT THAN EVERY OTHER SECRET RULE IN THIS FILE, AND THAT IS ITS PRICE.
+# RBAC's `resourceNames` takes exact names and cannot say "any name ending in -api-key", and the
+# serving names are chosen by people at run time. So the only rule that lets the gateway read
+# those Secrets is `get` on EVERY Secret in the tenant namespace -- which includes the vendor
+# keys onboard.sh copies there (hyperun-runpod, hyperun-shadeform, hyperun-gcp) and the
+# namespace's hyperun-user-secrets. A compromise of the gateway pod would then hand those over,
+# where today it can read only hyperun-user-secrets.
+#
+# WHY A SEPARATE ROLE AND NOT A LINE IN hyperun-gw-secrets: so it can be left out. A namespace
+# without this binding still creates, lists and deletes servings; only the endpoint and "show API
+# key" stop working there, both answering 502 with the apiserver's 403 in the message.
+#
+# WHAT WOULD REMOVE THE NEED (operator side, not done here): the operator writes the SHA-256 of
+# the key into the HyperunServing's status for the endpoint to compare, and adds the exact
+# Secret name to a per-namespace Role's resourceNames when it creates the Secret. Then this
+# rule could name `<serving>-api-key` objects one by one.
+#
+# The code reads exactly one Secret name per serving and one key in it (Cluster.serving_api_key
+# in the server's k8s.py builds the name itself).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hyperun-gw-serving-keys
+  namespace: <TENANT_NAMESPACE>
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hyperun-gw-serving-keys
+  namespace: <TENANT_NAMESPACE>
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hyperun-gw-serving-keys
+subjects:
   - kind: ServiceAccount
     name: hyperun-gw
     namespace: hyperun-system

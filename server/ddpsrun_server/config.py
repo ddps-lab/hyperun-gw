@@ -33,6 +33,20 @@ PACSJOB_GROUP = "hyperun.io"
 PACSJOB_VERSION = "v1alpha1"
 PACSJOB_PLURAL = "hyperunjobs"
 
+# HYPERUN-SERVING. The model-serving kind PACSrun's operator is adding beside HyperunJob: one
+# object asks for a model to be served within an hourly budget, and its status carries the
+# ranked plans, the chosen plan and the endpoint (contract of 2026-10-20, from the session
+# building the operator side). Same group and version as HyperunJob. If the operator ships it
+# under another version, this is the one place to change.
+SERVING_GROUP = "hyperun.io"
+SERVING_VERSION = "v1alpha1"
+SERVING_PLURAL = "hyperunservings"
+SERVING_KIND = "HyperunServing"
+# The Secret the operator creates beside each serving, and the key in it that holds the API
+# key a caller of /v1/servings/{ns}/{name}/v1/* presents as `Authorization: Bearer`.
+SERVING_API_KEY_SUFFIX = "-api-key"
+SERVING_API_KEY_KEY = "api-key"
+
 # HYPERUN-USER-SECRET. The ONE Kubernetes Secret per namespace that holds every
 # value that namespace's members registered through `PUT /v1/secrets/{name}`,
 # one key per environment variable name. Lives here rather than in `k8s.py`

@@ -32,9 +32,13 @@ def test_the_generated_references_match_the_code():
 def test_every_route_appears_in_the_api_reference():
     from ddpsrun_server.main import app
 
+    import re
+
     text = (REFERENCES / "api.md").read_text(encoding="utf-8")
     for route in app.routes:
-        path = getattr(route, "path", "")
+        # `{path:path}` (HYPERUN-SERVING-PROXY) is Starlette's converter syntax; OpenAPI, and so
+        # the reference, writes the parameter as `{path}`.
+        path = re.sub(r"\{(\w+):\w+\}", r"{\1}", getattr(route, "path", ""))
         if path.startswith("/v1/"):
             assert f"`{path}`" in text, path
 
