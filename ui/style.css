@@ -257,7 +257,7 @@ nav button.on { background: var(--primary-soft); color: var(--primary); }
 .spacer { flex: 1; }
 
 /* The right-hand end of the bar: who you are, the theme, the way out. It used
-   to open with the API hostname (`api.hyperun.ddps.cloud`), which is neither
+   to open with the API hostname (`api.<your-domain>`), which is neither
    something a reader can act on nor the thing 15.5 put in this corner -- that
    is the team. */
 .who {

@@ -3711,7 +3711,7 @@ function showApp(on) {
   if (on) {
     // HYPERUN-WHO. This line used to read
     //     store.server.replace(/^https?:\/\//, "").slice(0, 32)
-    // which printed `api.hyperun.ddps.cloud` in the corner 15.5 reserved for the
+    // which printed `api.<your-domain>` in the corner 15.5 reserved for the
     // team every screen inherits. The hostname is not something a reader on this
     // screen can act on, and it was the only thing here. The email is known from
     // the token without a request; the team arrives with the first /v1/stats and

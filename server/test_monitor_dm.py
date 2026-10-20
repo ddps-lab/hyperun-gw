@@ -3,9 +3,9 @@
 HYPERUN-MONITOR 의 Slack DM 로컬 테스트. **진짜 DM 을 보낸다.**
 
 실행:
-    python3 server/test_monitor_dm.py --to jglee
-    python3 server/test_monitor_dm.py --to jglee --explain      # AI 문장까지
-    python3 server/test_monitor_dm.py --to jglee --dry-run      # 보내지 않고 화면에만
+    python3 server/test_monitor_dm.py --to <owner>
+    python3 server/test_monitor_dm.py --to <owner> --explain      # AI 문장까지
+    python3 server/test_monitor_dm.py --to <owner> --dry-run      # 보내지 않고 화면에만
 
 무엇을 확인하는가:
     `monitor.py` 가 만드는 메시지가 **사람에게 실제로 도착하는지**. 규칙이
@@ -95,7 +95,7 @@ def build_message(owner: str, explanation: str) -> tuple[str, list, list]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="hyperun 감시 DM 을 실제로 보내본다")
-    parser.add_argument("--to", default="jglee",
+    parser.add_argument("--to", required=True,
                         help="owner label. iam_to_slack.json 의 key 와 같은 이름")
     parser.add_argument("--explain", action="store_true",
                         help="Upstage 에게 한국어 설명을 받아서 함께 보낸다 (약 $0.0002)")
