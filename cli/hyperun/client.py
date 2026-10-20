@@ -213,6 +213,47 @@ class Client:
         """Read this caller's team figures. Aggregate only."""
         return self._call("GET", "/v1/stats").json()
 
+    # ------------------------------------------------------------ HYPERUN-SERVING
+
+    @property
+    def server(self) -> str:
+        """The gateway's base URL, for printing a serving's full endpoint address."""
+        return self._server
+
+    def serving_models(self) -> dict[str, Any]:
+        """The presets, the supported dense families and the recommendation. No token needed."""
+        return self._call("GET", "/v1/serving-models", authenticated=False).json()
+
+    def model_config(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Read a model's config.json through the server and get its numbers, or a refusal.
+
+        Raises:
+            ServerError: 422 `[model-config-...]` saying why the model cannot be planned, 400
+                for an unregistered token name, 502 when the Hub could not be read.
+        """
+        return self._call("POST", "/v1/model-config", json_body=body).json()
+
+    def create_serving(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Create a serving. It rents machines and bills by the hour until it is deleted."""
+        return self._call("POST", "/v1/servings", json_body=body,
+                          timeout=SUBMIT_TIMEOUT).json()
+
+    def servings(self) -> dict[str, Any]:
+        """This caller's servings, without their ranked plans."""
+        return self._call("GET", "/v1/servings").json()
+
+    def serving(self, name: str) -> dict[str, Any]:
+        """One serving, with its plans, chosen plan and endpoint path."""
+        return self._call("GET", f"/v1/servings/{quote(name, safe='')}").json()
+
+    def delete_serving(self, name: str) -> None:
+        """Delete a serving; the operator gives back its machines and its billing stops."""
+        self._call("DELETE", f"/v1/servings/{quote(name, safe='')}")
+
+    def serving_key(self, name: str) -> dict[str, Any]:
+        """The serving endpoint's API key, for its owner. Never cached, never logged."""
+        return self._call("GET", f"/v1/servings/{quote(name, safe='')}/api-key").json()
+
     def exec_in_job(
         self, job: str, command: str, slot: int = 0, timeout_seconds: int = 20,
         session: bool = False, seq: int = 0,

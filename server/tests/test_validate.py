@@ -680,3 +680,146 @@ def test_validate_refuses_a_pin_it_cannot_place_and_names_what_it_did_not_check(
                         memory="1Gi")
     assert not result.ok and "pin-not-placeable" in codes(result)
     assert any("in stock" in line for line in result.not_checked)
+
+
+# ------------------------------------------------------------ HYPERUN-SERVING-PLAN
+
+
+def serving(**overrides):
+    """ShuntServe's README workload at the hourly budget the planner commit used. No target
+    rate: PACSrun removed it on 2026-10-19."""
+    fields = {"model": "llama-3.1-8b", "avg_input_tokens": 763, "avg_output_tokens": 232,
+              "hourly_budget": 20.8333}
+    fields.update(overrides)
+    return v.models.ServingPlanRequest(**fields)
+
+
+def check_plan(plan, capacity="on-demand", vendors=(), regions=("shadeform",), mode="compare",
+               gpu_asked=False, instance_type=None, parallelism=1):
+    """The serving check alone, with the placement the request model fills by default."""
+    return v.check_serving_plan(plan, capacity, list(vendors), list(regions), mode,
+                                gpu_asked, instance_type, parallelism)
+
+
+def found(findings):
+    return {(f.level, f.code) for f in findings}
+
+
+def test_a_job_without_a_serving_plan_hears_nothing_about_one():
+    assert check_plan(None) == []
+
+
+def test_a_good_plan_in_compare_mode_is_told_nothing_is_rented():
+    findings = check_plan(serving())
+    assert found(findings) == {(v.INFO, "serving-plan-compare")}
+    assert "NOTHING is rented" in findings[0].message
+
+
+def test_a_good_plan_without_compare_is_told_what_it_will_rent_and_the_ceiling():
+    findings = check_plan(serving(), mode=None)
+    assert found(findings) == {(v.INFO, "serving-plan-rents")}
+    # The hourly budget is the ceiling the planner keeps every plan within, in the sentence.
+    assert "$20.8333/h" in findings[0].message
+    assert "placement_mode compare" in findings[0].fix
+
+
+@pytest.mark.parametrize("bad, code, named", [
+    ({"model": "llama-3-8b"}, "serving-plan-model", "'llama-3-8b'"),
+    ({"model": None}, "serving-plan-model", "missing"),
+    ({"avg_input_tokens": 0}, "serving-plan-tokens", "avg_input_tokens is 0"),
+    ({"avg_output_tokens": None}, "serving-plan-tokens", "avg_output_tokens is missing"),
+    ({"hourly_budget": float("inf")}, "serving-plan-hourly-budget", "hourly_budget is inf"),
+    ({"hourly_budget": None}, "serving-plan-hourly-budget", "hourly_budget is missing"),
+    ({"hourly_budget": 0.0}, "serving-plan-hourly-budget", "hourly_budget is 0.0"),
+])
+def test_each_bad_value_is_an_error_that_names_the_field_and_the_value(bad, code, named):
+    findings = check_plan(serving(**bad))
+    errors = [f for f in findings if f.level == v.ERROR]
+    assert [f.code for f in errors] == [code]
+    assert named in errors[0].message
+    assert errors[0].fix
+
+
+@pytest.mark.parametrize("spelling", ["target_rps", "targetRPS"])
+def test_a_target_rate_is_refused_by_name_not_dropped(spelling):
+    """HYPERUN-SERVING-PLAN. PACSrun ranks by score under the budget since 2026-10-19 and has no
+    target rate. A body that still sends one would otherwise rent a plan chosen by a rule its
+    author did not ask for, so it is an error naming the field, with what to read instead."""
+    findings = check_plan(serving(**{spelling: 2.0}))
+    errors = [f for f in findings if f.level == v.ERROR]
+    assert [f.code for f in errors] == ["serving-plan-target-rps-removed"]
+    assert f"serving_plan.{spelling} is 2.0" in errors[0].message
+    assert "throughput_rps" in errors[0].fix and f"Remove {spelling}" in errors[0].fix
+
+
+def test_the_renting_note_says_score_and_never_cheapest():
+    """Rank 1 is the most requests per second per dollar-hour, which can be the dearer plan per
+    hour (PACSrun's own 2026-10-19 snapshot: $10.80/h beat $8.07/h). "cheapest" was wrong."""
+    for mode in (None, "compare"):
+        text = " ".join(f.message for f in check_plan(serving(), mode=mode))
+        assert "cheapest" not in text
+        assert "score" in text
+
+
+def test_an_unknown_model_is_answered_with_the_two_that_exist():
+    finding = next(f for f in check_plan(serving(model="mistral-7b")) if f.level == v.ERROR)
+    assert "llama-3.1-8b" in finding.fix and "llama-3.1-70b" in finding.fix
+
+
+def test_the_hourly_budget_is_described_as_a_rate_with_no_total():
+    finding = next(f for f in check_plan(serving(hourly_budget=None)) if f.level == v.ERROR)
+    assert "PER HOUR" in finding.message and "no total budget" in finding.message
+
+
+def test_spot_is_refused_because_shadeform_sells_none():
+    assert (v.ERROR, "serving-plan-capacity") in found(check_plan(serving(), capacity="spot"))
+
+
+def test_another_vendor_or_region_is_refused_and_only_what_was_sent_is_quoted():
+    by_vendor = next(f for f in check_plan(serving(), vendors=["aws"]) if f.level == v.ERROR)
+    assert by_vendor.code == "serving-plan-placement"
+    # regions [shadeform] is what the server filled, so it is not quoted as the caller's.
+    assert "vendors ['aws']" in by_vendor.message and "regions" not in by_vendor.message.split(".")[0]
+    by_region = next(f for f in check_plan(serving(), regions=["aws/us-east-1"]) if f.level == v.ERROR)
+    assert "regions ['aws/us-east-1']" in by_region.message
+    assert not [f for f in check_plan(serving(), vendors=["shadeform"]) if f.level == v.ERROR]
+
+
+def test_a_pinned_aws_machine_is_refused_and_a_gpu_ask_is_warned_about():
+    assert (v.ERROR, "serving-plan-pinned") in found(check_plan(serving(), instance_type="t3.xlarge"))
+    gpu = found(check_plan(serving(), gpu_asked=True))
+    assert (v.WARNING, "serving-plan-gpu-ignored") in gpu
+    assert not [c for level, c in gpu if level == v.ERROR]
+
+
+def test_the_aggregate_says_what_it_cannot_check_and_drops_the_vendor_ranking_notes():
+    result = v.validate(env={}, script=None, cap=None, vram_gb=None, job_estimate=KNOWN,
+                        capacity_type="on-demand", regions=["shadeform"],
+                        vendors=["shadeform"], placement_mode="compare",
+                        serving_plan=serving())
+    assert result.ok
+    # "nothing-to-compare" ranks vendors against each other; with a serving plan the one
+    # candidate is the planner and that note would be about something else.
+    assert "nothing-to-compare" not in codes(result)
+    assert "compare-buys-nothing" not in codes(result)
+    assert "serving-plan-compare" in codes(result)
+    assert any("fast enough for your traffic" in line for line in result.not_checked)
+
+
+def test_a_bad_serving_plan_makes_the_aggregate_not_ok():
+    result = v.validate(env={}, script=None, cap=None, vram_gb=None, job_estimate=KNOWN,
+                        capacity_type="on-demand", regions=["shadeform"],
+                        serving_plan=serving(hourly_budget=None))
+    assert not result.ok
+
+
+def test_a_renting_serving_job_must_be_one_pod_and_a_comparing_one_need_not_be():
+    """PACSrun's placement refuses parallelism other than 1 when it rents the plan: the decider
+    answers one machine, and a solve for two pods would reach the actuator with one machine for
+    two pods and fail there."""
+    renting = check_plan(serving(), mode=None, parallelism=2)
+    finding = next(f for f in renting if f.level == v.ERROR)
+    assert finding.code == "serving-plan-parallelism"
+    assert "parallelism is 2" in finding.message
+    assert not [f for f in check_plan(serving(), mode="compare", parallelism=2)
+                if f.level == v.ERROR]

@@ -20,6 +20,19 @@ END-TO-END FLOW of one submission, which is what this whole stage exists to do:
   8. `GET /v1/jobs/{job_id}/logs` finds the driver pod behind that job and
      streams its stdout, redacting the runner's own bookkeeping lines.
 
+A job that sends `serving_plan` takes the same path: step 4 writes
+spec.placement.servingPlan, step 7 returns the planner's ranked plans, and
+`GET /v1/jobs/{job_id}/serving-check` reads back what a serving check measured
+(HYPERUN-SERVING-PLAN, HYPERUN-SERVING-CHECK-ROUTE).
+
+A SERVING is the other shape of the same idea: a HyperunServing that stays up
+behind an OpenAI-compatible endpoint. `POST /v1/servings` creates it the way
+step 4-5 create a job, `GET /v1/servings/{name}` reads it back, and
+`/v1/servings/{ns}/{name}/v1/*` is the endpoint itself, authenticated by the
+serving's own API key rather than by a hyperun login (HYPERUN-SERVING,
+HYPERUN-SERVING-PROXY, HYPERUN-MODEL-CONFIG; the route block is marked
+HYPERUN-SERVING below).
+
 `/v1/explain` and `/v1/schema` were added with the CLI in stage 2. They make
 no judgement either — one is static prose, the other is generated from the
 request model — but they are what lets an agent use this service without having
@@ -58,7 +71,10 @@ from fastapi.responses import PlainTextResponse
 
 from . import artifacts
 from . import catalogue
+from . import modelconfig   # HYPERUN-MODEL-CONFIG
 from . import naming
+from . import proxy         # HYPERUN-SERVING-PROXY
+from . import servings      # HYPERUN-SERVING
 from . import registry      # HYPERUN-IMAGES: the container images this lab has built
 from . import cognito
 from . import measurements
@@ -71,7 +87,7 @@ from .config import Settings
 from . import secret_expiry
 from . import servermetrics    # HYPERUN-SERVER-METRICS
 from . import tokens_source   # HYPERUN-TOKENS-SOURCE
-from .k8s import Cluster, ClusterError, NotFound
+from .k8s import Cluster, ClusterError, Conflict, NotFound
 from . import estimate as estimator
 from . import metrics as metrics_reader
 from . import stats as stats_reader
@@ -96,6 +112,7 @@ from .models import (
     ImagesResponse,
     ScriptView,
     ScriptsResponse,
+    ServingCheckResponse,
     JobSpecResponse,
     JobView,
     NamespacesResponse,
@@ -127,6 +144,14 @@ from .models import (
     gpu_name_for,
     to_hyperunjob,
     vram_gb_for,
+)
+from .servings import (
+    ModelConfigRequest,
+    ModelConfigResponse,
+    ServingKeyResponse,
+    ServingListResponse,
+    ServingRequest,
+    ServingView,
 )
 
 logger = logging.getLogger("hyperun")
@@ -194,6 +219,9 @@ def build_state(app: FastAPI, force: bool = False) -> None:
     app.state.tokens = tokens
     app.state.cluster = cluster
     app.state.cognito = verifier
+    # HYPERUN-SERVING-PROXY. The proxy's cache of servings and key digests: one per process, and
+    # rebuilt with everything else, so a test never sees the previous test's servings.
+    app.state.serving_lookups = proxy.Lookups()
     app.state.ready = True
 
 
@@ -985,8 +1013,20 @@ def estimate_route(body: JudgementRequest, principal: PrincipalDep) -> EstimateR
         modelled=result.modelled,
         capacity_type=result.capacity_type,
         capacity_reason=result.capacity_reason,
-        warnings=result.warnings,
+        # HYPERUN-SERVING-PLAN. The estimator models a TRAINING run on a GPU the request
+        # names, and a serving plan names none: its price is the planner's answer, which
+        # exists only after submit. Said here so the hours and rate above are not read as
+        # the plan's.
+        warnings=result.warnings + ([SERVING_ESTIMATE_NOTE] if body.serving_plan else []),
     )
+
+
+SERVING_ESTIMATE_NOTE = (
+    "This job carries a serving plan, so the figures above do not price it: the planner "
+    "chooses the machines after submit and each plan's cost per hour, at most the hourly "
+    "budget, is on the job's page as serving_plans. placement_mode compare lists them and "
+    "rents nothing."
+)
 
 
 def _validation_for(body: JudgementRequest, request: Request,
@@ -1053,6 +1093,10 @@ def _validation_for(body: JudgementRequest, request: Request,
         instance_type=body.instance_type,
         cpus=body.cpus,
         memory=body.memory,
+        # HYPERUN-SERVING-PLAN. Whether PACSrun will plan this serving plan, and whether
+        # the rest of the job agrees with it; a no here keeps the job from being created.
+        serving_plan=body.serving_plan,
+        gpu_asked=body.gpu is not None,
     )
 
 
@@ -1596,7 +1640,16 @@ def list_namespaces(request: Request, principal: PrincipalDep) -> NamespacesResp
     )
 
 
-@app.get("/v1/jobs", response_model=JobListResponse)
+# HYPERUN-SERVING-PLAN. Each row leaves out `serving_plans`, and that is about the bytes. One
+# serving job carries up to 50 plans; the 12 plans of the 2026-10-19 Shadeform snapshot are 14.3
+# KB as the planner writes them (PACSrun's api/v1alpha1/hyperunjob_types.go, ServingPlans), so 50
+# are roughly 60 KB. The screen
+# polls this list every 15 s, which is 240 polls an hour: ten such jobs in one namespace would be
+# 10 x 60 KB x 240 = 144 MB an hour for one open tab, about $0.013 an hour at AWS's $0.09/GB
+# internet egress, for a column the list never draws. The detail route still returns them, and
+# `serving_plan_chosen` (one small object) stays on the row.
+@app.get("/v1/jobs", response_model=JobListResponse,
+         response_model_exclude={"jobs": {"__all__": {"serving_plans"}}})
 def list_jobs(
     request: Request,
     principal: PrincipalDep,
@@ -2121,6 +2174,313 @@ def get_artifacts(
         truncated=listing.truncated,
         note="" if files else "Nothing is uploaded here yet.",
     )
+
+
+@app.get("/v1/jobs/{job_id}/serving-check", response_model=ServingCheckResponse)
+def get_serving_check(
+    request: Request,
+    job_id: str,
+    principal: PrincipalDep,
+    namespace: str = NAMESPACE_QUERY,
+) -> ServingCheckResponse:
+    """What a serving check measured, next to what the planner estimated.
+
+    HYPERUN-SERVING-CHECK-ROUTE. Reads ONE file from the job's own result path,
+    `serving-check-result.json`, and returns its JSON when it declares the schema
+    `hyperun.serving-check/v1`. The prefix is the one on the job object, through
+    the same owner gate as the artifacts route; artifacts.py narrates the read and
+    why the server makes it rather than the browser.
+
+    COST, per call: one S3 GetObject ($0.0004 per 1,000 in S3 Standard), a
+    transfer from S3 to this pod in the same region (free), and the file out
+    to the browser at AWS's $0.09/GB, a few KB. The screen calls it once per
+    open of a job whose file list shows the file, and on Refresh.
+
+    Raises:
+        HTTPException: 404 for an unknown job; 502 when the cluster or S3
+            refused, with S3's own words.
+    """
+    cluster: Cluster = request.app.state.cluster
+    name = resolve_object_name(job_id)
+    try:
+        obj: dict[str, Any] = require_owner(
+            cluster.get_job(namespace_for(principal, namespace), name), principal)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="no such job") from exc
+    except ClusterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    file_name = artifacts.SERVING_CHECK_FILE
+    address = artifacts.split_result_path((obj.get("spec") or {}).get("resultPath") or "")
+    if address is None:
+        return ServingCheckResponse(
+            found=False, name=file_name,
+            note="This job has no result path, so there is no serving check to read.")
+
+    settings: Settings = request.app.state.settings
+    bucket, prefix = address
+    try:
+        raw = artifacts.read_small_object(
+            bucket, prefix + file_name,
+            result_bucket=settings.result_bucket,
+            result_prefix=settings.result_prefix,
+            max_bytes=artifacts.SERVING_CHECK_MAX_BYTES,
+        )
+    except artifacts.ForeignResultPath as exc:
+        return ServingCheckResponse(found=False, name=file_name, note=str(exc))
+    except artifacts.NotUploaded:
+        return ServingCheckResponse(
+            found=False, name=file_name,
+            note=f"{file_name} is not in this job's result path (yet). A serving check "
+                 f"uploads it as soon as its three bench runs end.")
+    except artifacts.TooLarge as exc:
+        return ServingCheckResponse(found=False, name=file_name, note=str(exc))
+    except Exception as exc:  # noqa: BLE001 - botocore raises several types here
+        raise HTTPException(status_code=502, detail=f"S3 refused the read: {exc}") from exc
+
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        return ServingCheckResponse(
+            found=False, name=file_name, note=f"{file_name} is not JSON.")
+    schema = document.get("schema") if isinstance(document, dict) else None
+    if schema != artifacts.SERVING_CHECK_SCHEMA:
+        return ServingCheckResponse(
+            found=False, name=file_name,
+            note=f"{file_name} declares schema {schema!r}, not "
+                 f"{artifacts.SERVING_CHECK_SCHEMA!r}, so it is not read as a serving check.")
+    return ServingCheckResponse(found=True, name=file_name, check=document)
+
+
+# ================================================================== HYPERUN-SERVING
+#
+# A model served behind an endpoint (servings.py has the flow). Seven routes:
+#
+#   GET    /v1/serving-models                       presets, dense families, a recommendation
+#   POST   /v1/model-config                         an HF id or URL -> spec.model.config
+#   POST   /v1/servings                             create a HyperunServing
+#   GET    /v1/servings                             list them (no plans: size)
+#   GET    /v1/servings/{name}                      one, with plans and the endpoint path
+#   DELETE /v1/servings/{name}                      delete it; the operator gives back the machines
+#   GET    /v1/servings/{name}/api-key              the endpoint's key, for its owner
+#   GET|POST /v1/servings/{ns}/{name}/v1/{path}     the OpenAI endpoint itself (proxy.py)
+
+
+@app.get("/v1/serving-models")
+def serving_models() -> dict[str, Any]:
+    """Which models a serving can be planned for. HYPERUN-MODEL-CONFIG.
+
+    The planner's presets with their numbers, the dense families known to plan correctly with an
+    example id each, the recommendation for a caller who has no model in mind, and what is
+    refused. No token: it is static, like /v1/schema, and makes no cluster call.
+    """
+    return modelconfig.guidance()
+
+
+def _hf_token(request: Request, principal: Principal, name: str | None) -> str | None:
+    """The VALUE registered under `name` in the caller's namespace, for huggingface.co.
+
+    HYPERUN-MODEL-CONFIG. Read only when the caller named it AND a config.json is about to be
+    fetched. It goes into one Authorization header to huggingface.co and nowhere else: not a
+    log line, not a response, not an exception message.
+
+    Raises:
+        HTTPException: 400 when nothing is registered under that name, 502 on a cluster error.
+    """
+    if not name:
+        return None
+    if not re.fullmatch(SECRET_NAME_PATTERN, name):
+        raise HTTPException(status_code=400,
+                            detail=f"[model-config-token-missing] {name!r} is not a name a "
+                                   f"value can be registered under, e.g. HF_TOKEN.")
+    try:
+        return request.app.state.cluster.user_secret_value(principal.namespace, name)
+    except NotFound:
+        raise HTTPException(
+            status_code=400,
+            detail=f"[model-config-token-missing] {name} is not registered in your namespace. "
+                   f"Register a Hugging Face token with `hyperun secret-set {name}`.") from None
+    except ClusterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/v1/model-config", response_model=ModelConfigResponse)
+def model_config_route(body: ModelConfigRequest, request: Request,
+                       principal: PrincipalDep) -> ModelConfigResponse:
+    """Read a model's config.json and return the numbers a serving's spec.model.config takes.
+
+    HYPERUN-MODEL-CONFIG. Send `model` (an HF id, optionally `revision`) or `config_url`, and
+    `hf_token_secret` naming a registered token for a gated repository. The answer's `config`
+    can be passed as `model.config` to POST /v1/servings; `spec_config` is the same block in the
+    CRD's camelCase for an agent that writes the object itself.
+
+    Raises:
+        HTTPException: 422 `[model-config-moe]`, `[model-config-architecture]`,
+            `[model-config-missing]`, `[model-config-gated]`, `[model-config-not-found]`,
+            `[model-config-url]` or `[model-config-ask]`, each saying what to do; 502
+            `[model-config-unreachable]` when the Hub or the URL could not be read; 400 when the
+            named token is not registered.
+    """
+    token = _hf_token(request, principal, body.hf_token_secret)
+    try:
+        found = modelconfig.lookup(body.model, body.config_url, body.revision, token=token)
+    except modelconfig.ModelConfigError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+    return ModelConfigResponse(
+        name=found.repo, revision=found.revision, config_source=found.source,
+        family=found.family, config=servings.config_view(found.config),
+        spec_config=found.config, notes=found.notes)
+
+
+def _serving_or_404(request: Request, principal: Principal, name: str,
+                    namespace: str) -> dict[str, Any]:
+    """One HyperunServing the caller may see, or 404 (HYPERUN-OWNER-GATE, as for jobs)."""
+    if not K8S_NAME.fullmatch(name):
+        raise HTTPException(status_code=404, detail="no such serving")
+    try:
+        obj = request.app.state.cluster.get_serving(namespace_for(principal, namespace), name)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="no such serving") from exc
+    except ClusterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if not owned_by_caller(obj, principal):
+        raise HTTPException(status_code=404, detail="no such serving")
+    return obj
+
+
+@app.post("/v1/servings", response_model=ServingView, status_code=201)
+def create_serving(body: ServingRequest, request: Request,
+                   principal: PrincipalDep) -> ServingView:
+    """Serve a model behind an OpenAI-compatible endpoint. HYPERUN-SERVING.
+
+    ★ THIS SPENDS MONEY UNTIL IT IS DELETED. The operator rents the highest-score plan within
+    `hourly_budget` and keeps it, billed by the hour, until DELETE /v1/servings/{name} (or
+    `max_spend_usd`, when sent). The answer's `billing` says how much an hour and a day.
+
+    Returns:
+        The serving's view; `endpoint.path` is where it will answer once `endpoint.ready`.
+
+    Raises:
+        HTTPException: 400 naming every problem with the request, or carrying the apiserver's
+            refusal; 422/502 from the model-config lookup (see /v1/model-config); 409 when a
+            serving of that name exists in your namespace.
+    """
+    cluster: Cluster = request.app.state.cluster
+    problems = servings.request_problems(
+        body, lambda: _own_secret_names(request, principal.namespace))
+    if problems:
+        raise HTTPException(status_code=400, detail="this serving was not created:\n  - "
+                            + "\n  - ".join(problems))
+    # The token is read only when config.json will actually be fetched: a preset or a config
+    # the caller filled needs none, and reading a secret value for nothing is still a read.
+    fetches = not body.model.preset and body.model.config is None
+    token = _hf_token(request, principal, body.hf_token_secret) if fetches else None
+    try:
+        model_spec = servings.resolve_model(body, token)
+    except modelconfig.ModelConfigError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+    obj = servings.to_hyperunserving(body, principal, model_spec)
+    try:
+        created = cluster.create_serving(principal.namespace, obj)
+    except Conflict:
+        raise HTTPException(
+            status_code=409,
+            detail=f"a serving named {body.name} already exists in your namespace. Delete it "
+                   f"with `hyperun serving-delete {body.name}` or choose another name.") from None
+    except ClusterError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info("serving %s created for %s in %s", body.name, principal.user,
+                principal.namespace)
+    # The apiserver's copy has no namespace filled in on some clients; ours always does.
+    created.setdefault("metadata", {}).setdefault("namespace", principal.namespace)
+    return ServingView.from_object(created)
+
+
+# HYPERUN-SERVING. Rows leave out serving_plans for the reason GET /v1/jobs does: up to 50
+# plans are roughly 60 KB per serving, and the screen polls the list.
+@app.get("/v1/servings", response_model=ServingListResponse,
+         response_model_exclude={"servings": {"__all__": {"serving_plans"}}})
+def list_servings(request: Request, principal: PrincipalDep,
+                  namespace: str = NAMESPACE_QUERY) -> ServingListResponse:
+    """This caller's servings, newest first (HYPERUN-OWNER-GATE filters namespace-mates')."""
+    try:
+        objects = request.app.state.cluster.list_servings(namespace_for(principal, namespace))
+    except ClusterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    views = [ServingView.from_object(obj) for obj in objects if owned_by_caller(obj, principal)]
+    views.sort(key=lambda view: view.created_at or "", reverse=True)
+    return ServingListResponse(servings=views, total=len(views))
+
+
+@app.get("/v1/servings/{name}", response_model=ServingView)
+def get_serving(name: str, request: Request, principal: PrincipalDep,
+                namespace: str = NAMESPACE_QUERY) -> ServingView:
+    """One serving: phase, ranked plans, the chosen plan's machines, the endpoint path."""
+    return ServingView.from_object(_serving_or_404(request, principal, name, namespace))
+
+
+@app.delete("/v1/servings/{name}", status_code=204)
+def delete_serving(name: str, request: Request, principal: PrincipalDep,
+                   namespace: str = NAMESPACE_QUERY) -> Response:
+    """Delete a serving. The operator watches for it and gives back every machine it rented;
+    the endpoint answers 404 within LOOKUP_TTL_SECONDS (proxy.py)."""
+    _serving_or_404(request, principal, name, namespace)
+    try:
+        request.app.state.cluster.delete_serving(namespace_for(principal, namespace), name)
+    except NotFound as exc:
+        raise HTTPException(status_code=404, detail="no such serving") from exc
+    except ClusterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(status_code=204)
+
+
+@app.get("/v1/servings/{name}/api-key", response_model=ServingKeyResponse)
+def serving_api_key(name: str, request: Request, response: Response, principal: PrincipalDep,
+                    namespace: str = NAMESPACE_QUERY) -> ServingKeyResponse:
+    """The endpoint's API key, read from the Secret the operator created. HYPERUN-SERVING-KEY.
+
+    Only the serving's owner (or an operator) gets it: the owner gate runs first, and a
+    namespace-mate's serving reads as 404. `Cache-Control: no-store` keeps it out of any cache
+    between here and the screen, and nothing on this server logs it.
+
+    Raises:
+        HTTPException: 404 for no such serving, 409 when the operator has not issued the key
+            yet, 502 on a cluster error (a 403 underneath means the namespace has no
+            hyperun-gw-serving-keys RoleBinding, config/deploy/rbac.yaml).
+    """
+    obj = _serving_or_404(request, principal, name, namespace)
+    ns = (obj.get("metadata") or {}).get("namespace") or namespace_for(principal, namespace)
+    try:
+        key = request.app.state.cluster.serving_api_key(ns, name)
+    except NotFound:
+        raise HTTPException(
+            status_code=409,
+            detail=f"serving {name} has no API key yet; the operator issues one when it starts "
+                   f"the serving. Phase: {((obj.get('status') or {}).get('phase')) or 'none'}."
+        ) from None
+    except ClusterError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    response.headers["Cache-Control"] = "no-store"
+    return ServingKeyResponse(api_key=key, endpoint_path=servings.endpoint_path(ns, name))
+
+
+@app.api_route("/v1/servings/{ns}/{name}/v1/{path:path}", methods=["GET", "POST"])
+async def serving_proxy(request: Request, ns: str, name: str, path: str) -> Response:
+    """The serving's OpenAI-compatible endpoint. HYPERUN-SERVING-PROXY.
+
+    Use `<server>/v1/servings/<ns>/<name>/v1` as an OpenAI client's base_url and the serving's
+    API key (GET /v1/servings/{name}/api-key) as its api_key. NOT a hyperun login: this path
+    takes only that key. Streaming (`"stream": true`) is passed through as it arrives. Errors
+    are OpenAI-shaped: 401 no or wrong key, 404 no such serving, 503 not ready yet, 413 a body
+    over 2 MiB, 502 the model server did not answer.
+    """
+    # A path segment of ".." would leave vLLM's /v1 for its other routes (/metrics, /health);
+    # an empty one is a malformed request either way.
+    if (not K8S_NAME.fullmatch(ns) or not K8S_NAME.fullmatch(name)
+            or any(part in ("", ".", "..") for part in path.split("/"))):
+        return proxy.error(404, "serving_not_found", "There is no such serving path.")
+    return await proxy.handle(request, request.app.state.cluster,
+                              request.app.state.serving_lookups, ns, name, path)
 
 
 @app.post("/v1/jobs/{job_id}/exec", response_model=ExecResponse)

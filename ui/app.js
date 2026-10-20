@@ -293,6 +293,8 @@ async function route() {
     arg.split("@")[0] === termUI.jobKey;
   if (termUI.open && !goingToThisJob) closeTerminal("");
   if (!goingToThisJob) termUI.jobKey = null;
+  // HYPERUN-SERVING-KEY. A serving's API key shown on its page does not outlive the page.
+  hideServingKey();
 
   try {
     if (head === "jobs" && arg) {
@@ -305,6 +307,8 @@ async function route() {
     }
     else if (head === "jobs")   { show("jobs");   drawJobs(); }
     else if (head === "submit") { show("submit"); drawImages(); drawRegionChoices(); }
+    // HYPERUN-SERVING. #/servings is the list and the form, #/servings/<name> one serving.
+    else if (head === "servings") { show("servings"); drawServings(arg || ""); }
     else if (head === "scripts") { show("scripts"); drawScripts(); }
     else if (head === "team")   { show("team");   drawTeam(); }
     else if (head === "vendors") { show("vendors"); drawVendors(); }
@@ -562,6 +566,7 @@ let logText = "";
 let logTruncated = false;
 let lastSpec = null;  // what "Run again" copies from.
 let detailNs = "";    // which namespace the open detail screen reads. "" = own.
+let detailJob = null; // the last job answer drawn, so the spec's late arrival can redraw it.
 
 /* The ?namespace= suffix every detail request carries when an operator opened
    a foreign job. One helper rather than five string concatenations, because
@@ -604,6 +609,11 @@ async function drawDetail(jobId, ns = "") {
   $("d-gpu-panel").hidden = true;
   $("d-learning-panel").hidden = true;
   $("d-progress-panel").hidden = true;
+  // HYPERUN-SERVING-PLAN, the same rule for the two serving panels: each is drawn from THIS
+  // job's answer or stays hidden, never left showing the previous job's plans or measurements.
+  $("d-serving-panel").hidden = true;
+  $("d-servecheck-panel").hidden = true;
+  detailJob = null;
 
   // The spec panel's summary says which image this job ran, so a folded panel
   // still answers the question it is most often opened for.
@@ -630,6 +640,9 @@ async function drawDetail(jobId, ns = "") {
       ? note("info", `${spec.redacted.join(", ")} came from a Kubernetes Secret. ` +
              `Neither the value nor the Secret's name ever reaches this page.`)
       : "";
+    // HYPERUN-SERVING-PLAN. The ask lives in the spec, and a finished job's poll may already
+    // have run and stopped before this answer arrived, so the panel is drawn again from here.
+    if (detailJob) drawServingPlan(detailJob);
   }).catch((err) => { $("d-spec").textContent = err.message; });
 
   poll.every(5, async () => {
@@ -679,6 +692,7 @@ async function drawDetail(jobId, ns = "") {
     ].join("");
 
     drawCompare(job);
+    drawServingPlan(job);
     drawStopButton(jobId, job);
     drawTerminal(jobId, job);
     // After the panels know whether they have anything, and before the reader
@@ -969,6 +983,10 @@ async function drawArtifacts(jobId) {
     $("d-files").innerHTML = note("err", err.message);
     return;
   }
+  // HYPERUN-SERVING-CHECK. Only a listing that carries the result file costs the extra request.
+  // Hidden otherwise, which also hides a check drawn before Refresh found it gone.
+  if (a.files.some((f) => f.name === SERVING_CHECK_FILE)) drawServingCheck(jobId);
+  else $("d-servecheck-panel").hidden = true;
   if (!a.files.length) {
     $("d-files").innerHTML = `<p class="dim">${esc(a.note || "No files.")}</p>`;
     return;
@@ -1460,6 +1478,560 @@ function drawCompare(job) {
       : `Nothing was rented and the workload did not run. ${c.raw}`);
 }
 
+/* HYPERUN-SERVING-PLAN. The Serving plan panel: the planner's ranked rental plans for a job that
+   sent `serving_plan`, and the one the operator rented.
+
+   END-TO-END FLOW of what reaches this panel:
+     1. The job was submitted with `serving_plan` (readForm), which the gateway wrote as
+        PACSrun's spec.placement.servingPlan with regions [shadeform].
+     2. PACSrun's planner ranked up to 50 plans by score, estimated requests per second per
+        dollar-hour, every plan within the hourly budget, and wrote them to status.servingPlans
+        with the catalog it read in status.servingCatalog; outside compare mode it rented the
+        highest-score plan that runs on one machine and wrote that to status.servingPlanChosen,
+        with the attempt it is on.
+     3. GET /v1/jobs/{id} returns both as `serving_plans` and `serving_plan_chosen`, money and
+        rates as the decimal strings PACSrun wrote. This panel prints them as they are.
+
+   ONE ROW PER PIPELINE, NOT PER PLAN. A plan is one or more pipelines, each a copy of the model
+   whose layers are split in order across machines of one domain; rank 1 of the 2026-10-19
+   snapshot is two pipelines on five machines. The plan's own numbers (rank, req/s, $/h,
+   latency, executable) span its pipeline rows, and each pipeline row names its domain and its
+   machines with the layers and TP each one holds.
+
+   ★ RANK 1 IS THE BEST SCORE, NOT THE CHEAPEST, and the summary said "cheapest" until
+   2026-10-20. In PACSrun's own 2026-10-19 snapshot one 8-GPU machine at $10.80/h scores 1.137
+   req/s per $/h and outranks five machines at $8.07/h scoring 0.308. The Score column is the
+   number the ranks are sorted by, so the reader can see why the order is what it is. */
+function servingPlanHtml(job, asked) {
+  const plans = job.serving_plans || [];
+  const chosen = job.serving_plan_chosen || null;
+  const parts = [];
+  if (job.placement_mode === "compare") {
+    parts.push(note("info", "Compare mode: these plans were priced and nothing was rented."));
+  }
+  if (asked) {
+    parts.push(`<p class="dim small">Asked for ${esc(asked.model)}, ` +
+      `${esc(asked.avgInputTokens)} tokens in and ${esc(asked.avgOutputTokens)} out, ` +
+      `the most requests per second per dollar within $${esc(asked.hourlyBudget)}/h.</p>`);
+  }
+  // The operator's own sentence, with the fetch time: the cluster refreshes the catalog every 10
+  // minutes, so two jobs with the same ask can get different lists and this says which one.
+  if (job.serving_catalog) {
+    parts.push(`<p class="dim tiny">Ranked on: ${esc(job.serving_catalog)}</p>`);
+  }
+  if (chosen) {
+    parts.push(`<div class="facts">` + [
+      fact("Rented plan", `rank ${chosen.rank}, attempt ${chosen.attempt}`),
+      fact("VM", chosen.instance_type),
+      fact("Where", `${chosen.cloud} / ${chosen.region}`),
+      fact("Price", `$${chosen.cost_per_hour}/h`),
+      fact("Estimated", `${chosen.throughput_rps} req/s, ` +
+        (chosen.latency_seconds != null ? `${chosen.latency_seconds} s` : "latency -")),
+      fact("Score", chosen.score != null ? `${chosen.score} req/s per $/h` : "-"),
+    ].join("") + `</div>`);
+  }
+  if (!plans.length) {
+    // The 74 to 92 s is PACSrun's own measurement of one planner run (pkg/decider/shuntserve,
+    // run against its 300 s timeout), so "still working" has a size.
+    parts.push(`<p class="dim">${esc(TERMINAL.includes(job.phase)
+      ? "No plan came back. The job's message says why."
+      : "The planner has not answered yet. One run took 74 to 92 s in PACSrun's own tests.")}</p>`);
+    return { summary: "no plans yet", html: parts.join("") };
+  }
+
+  const rows = plans.map((p) => {
+    const isChosen = Boolean(chosen) && chosen.rank === p.rank;
+    const pipes = (p.pipelines && p.pipelines.length) ? p.pipelines : [{ domain: "", stages: [] }];
+    const span = pipes.length > 1 ? ` rowspan="${pipes.length}"` : "";
+    const executable = p.executable === true ? "yes" : p.executable === false ? "no" : "-";
+    return pipes.map((q, i) => {
+      const machines = (q.stages || []).map((s) =>
+        `${esc(s.instance_type)} <span class="dim">${esc(s.layers)} layers, TP ${esc(s.tp)}</span>`
+      ).join("<br>");
+      // A pipeline's own share only when there is more than one; alone it IS the plan's.
+      const share = pipes.length > 1
+        ? `<div class="dim tiny">${esc(q.throughput_rps)} req/s, $${esc(q.cost_per_hour)}/h</div>`
+        : "";
+      const head = i > 0 ? "" :
+        `<td class="num span-top"${span}>${esc(p.rank)}` +
+        (isChosen ? `<div class="tiny"><b>chosen</b>, attempt ${esc(chosen.attempt)}</div>` : "") +
+        `</td>`;
+      const tail = i > 0 ? "" :
+        `<td class="num span-top"${span}>${esc(p.score ?? "-")}</td>` +
+        `<td class="num span-top"${span}>${esc(p.throughput_rps ?? "-")}</td>` +
+        `<td class="num span-top"${span}>${p.cost_per_hour != null ? "$" + esc(p.cost_per_hour) : "-"}</td>` +
+        `<td class="num span-top"${span}>${p.latency_seconds != null ? esc(p.latency_seconds) + " s" : "-"}</td>` +
+        `<td class="span-top"${span}>${executable}</td>`;
+      return `<tr${isChosen ? ' class="chosen"' : ""}>${head}` +
+        `<td class="span-top">${esc(q.domain)}${share}</td><td>${machines}</td>${tail}</tr>`;
+    }).join("");
+  }).join("");
+
+  parts.push(`<div class="scroll"><table><thead><tr>` +
+    `<th>Rank</th><th>Domain</th><th>VM(s)</th>` +
+    `<th title="Estimated requests per second per dollar-hour: the number the ranks are sorted by">Score</th>` +
+    `<th>req/s</th><th>$/h</th><th>Latency</th>` +
+    `<th title="Runs on one machine, which is the only kind the operator can rent today">Executable</th>` +
+    `</tr></thead><tbody>${rows}</tbody></table></div>`);
+  // The lowest rank, not plans[0]: the server sends them in rank order today, and a summary that
+  // named the wrong plan's score because of an order change would be wrong without looking it.
+  const best = plans.reduce((a, b) => (b.rank < a.rank ? b : a));
+  const summary = `${plans.length} plan${plans.length === 1 ? "" : "s"}, rank ${best.rank} ` +
+    (best.score != null ? `scores ${best.score} at ` : "is ") + `$${best.cost_per_hour}/h` +
+    (chosen ? `, rented rank ${chosen.rank}` : job.placement_mode === "compare" ? ", nothing rented" : "");
+  return { summary, html: parts.join("") };
+}
+
+/* Show or hide the panel. Shown when the job has plans, a rented plan, or asked for one (the
+   spec says so), so a serving job whose planner is still working says that rather than nothing. */
+function drawServingPlan(job) {
+  detailJob = job;
+  const asked = lastSpec?.spec?.placement?.servingPlan || null;
+  const shown = Boolean((job.serving_plans || []).length || job.serving_plan_chosen || asked);
+  $("d-serving-panel").hidden = !shown;
+  if (!shown) return;
+  const view = servingPlanHtml(job, asked);
+  $("d-serving-note").textContent = view.summary;
+  $("d-serving").innerHTML = view.html;
+}
+
+/* HYPERUN-SERVING-CHECK. The Serving check panel: what a serving check job measured with vLLM
+   on the rented machine, next to what the planner estimated for that machine.
+
+   END-TO-END FLOW:
+     1. The job's script writes `serving-check-result.json` (schema hyperun.serving-check/v1)
+        and announces it with a HYPERUN_ARTIFACT= line; the driver copies it to the result path.
+     2. drawArtifacts sees the file in GET /v1/jobs/{id}/artifacts and calls drawServingCheck.
+     3. GET /v1/jobs/{id}/serving-check reads the file on the server (the browser may not read
+        S3 bytes: the results bucket allows no cross-origin read) and returns its JSON.
+     4. servingCheckHtml lays out `comparison`: each estimate beside its measurement and the
+        ratio the script computed. Nothing is computed here.
+
+   A VALUE THE JOB COULD NOT MEASURE IS null IN THE FILE, never 0, and is printed as "not
+   measured": a failed run must not read as a run that measured zero. */
+const SERVING_CHECK_FILE = "serving-check-result.json";
+
+function servingCheckHtml(answer) {
+  if (!answer || !answer.found || !answer.check) {
+    return { summary: "no result to show",
+             html: note("info", (answer && answer.note) || "No serving check result.") };
+  }
+  const c = answer.check;
+  const cmp = c.comparison || {};
+  const plan = c.plan || {};
+  const shown = (x, unit) => (x === null || x === undefined) ? null : `${x}${unit}`;
+  const estimate = (x, unit) => shown(x, unit) ?? "-";
+  const measured = (x, unit) => shown(x, unit) ?? "not measured";
+  const parts = [];
+
+  if (c.status === "failed") {
+    parts.push(note("err", `The check failed in ${c.failed_phase || "an unnamed phase"}: ` +
+      `${c.message || "no reason written"}. What it measured before that is below.`));
+  }
+  const cards = (c.gpu && c.gpu.cards) || [];
+  parts.push(`<div class="facts">` + [
+    fact("Model", (c.model && c.model.id) || "-"),
+    fact("GPU", cards.length ? `${cards[0].name} × ${c.gpu.count}` : "-"),
+    fact("Plan", ([plan.cloud, plan.region].filter(Boolean).join(" / ") +
+      (plan.shade_instance_type ? ` ${plan.shade_instance_type}` : "") +
+      (plan.usd_per_hour != null ? `, $${plan.usd_per_hour}/h` : "")) || "-"),
+    fact("vLLM", (c.software && c.software.vllm_version) || "-"),
+  ].join("") + `</div>`);
+
+  // No "Target rate" row since 2026-10-20: a serving plan has no target request rate (PACSrun
+  // removed targetRPS on 2026-10-19), so the check compares the plan's two estimates only.
+  const rows = [
+    ["Throughput at full load", estimate(cmp.max_rps_planned, " req/s"),
+      measured(cmp.max_rps_measured, " req/s"), estimate(cmp.max_rps_ratio, "")],
+    ["Latency of one request alone", estimate(cmp.single_latency_s_planned, " s"),
+      measured(cmp.single_latency_s_measured, " s"), estimate(cmp.single_latency_ratio, "")],
+  ];
+  parts.push(`<div class="scroll"><table><thead><tr>` +
+    `<th></th><th>Planner estimate</th><th>Measured</th><th>Measured / estimate</th>` +
+    `</tr></thead><tbody>` +
+    rows.map(([k, e, m, r]) =>
+      `<tr><td>${esc(k)}</td><td class="num">${esc(e)}</td>` +
+      `<td class="num">${esc(m)}</td><td class="num">${esc(r)}</td></tr>`).join("") +
+    `</tbody></table></div>`);
+  if (c.written_at) {
+    parts.push(`<p class="dim tiny">Written ${esc(when(c.written_at))} by the job's script, ` +
+      `${esc(answer.name)}.</p>`);
+  }
+  const summary = c.status === "failed" ? `failed in ${c.failed_phase || "?"}`
+    : (cmp.max_rps_measured != null
+      ? `measured ${cmp.max_rps_measured} req/s against ${estimate(cmp.max_rps_planned, "")} estimated`
+      : "nothing measured");
+  return { summary, html: parts.join("") };
+}
+
+async function drawServingCheck(jobId) {
+  let answer;
+  try {
+    answer = await call(`/v1/jobs/${jobId}/serving-check` + nsQuery());
+  } catch (err) {
+    answer = { found: false, note: err.message };
+  }
+  // The reader may have opened another job while this was in flight; its answer is not theirs.
+  if ($("d-id").textContent !== jobId) return;
+  const view = servingCheckHtml(answer);
+  $("d-servecheck-note").textContent = view.summary;
+  $("d-servecheck").innerHTML = view.html;
+  $("d-servecheck-panel").hidden = false;
+}
+
+/* ------------------------------------------------------------ 3c. Servings */
+
+/* HYPERUN-SERVING. The Servings screen: a model served behind an OpenAI-compatible endpoint.
+
+   END-TO-END FLOW:
+     1. #/servings: drawServings("") lists GET /v1/servings every 15 s (servingRowsHtml) and
+        fills the New serving form once (drawServingForm): the presets and the recommendation
+        from GET /v1/serving-models, the token choices from GET /v1/secrets `own` -- the values
+        this namespace registered, which are the only ones the server may read for a lookup.
+     2. "Look up this model" sends POST /v1/model-config and shows the numbers or the refusal
+        (modelConfigHtml). It is a PREVIEW: Create sends the id again and the server reads
+        config.json itself, so what is created never rests on a lookup made for another id.
+     3. Create sends readServingForm() to POST /v1/servings and opens the new serving's page.
+     4. #/servings/<name>: drawServing polls GET /v1/servings/<name> every 10 s and draws the
+        facts, the endpoint URL (this page's server + endpoint.path), the chosen plan's machines
+        and the ranked plans (servingFactsHtml, servingChosenHtml, servingPlansHtml).
+     5. "Show API key" reads GET /v1/servings/<name>/api-key ONCE per click and shows it until
+        Hide or any route change (hideServingKey, called from route()). It is never stored.
+     6. "Delete serving" asks, sends DELETE, and goes back to the list.
+
+   NOTHING IS DECIDED HERE: which models are allowed, whether a budget is valid and which plan
+   is rented are the server's and the operator's. The one number computed here is the cost
+   ceiling shown before Create (servingCostHtml), budget x 24, because the person must see what
+   a day costs before the money is committed, and no server has been asked anything yet. */
+
+let servingFormDrawn = false;
+
+/* The New serving form as the body POST /v1/servings takes. Empty token boxes are LEFT OUT so
+   the server's defaults (763 and 232, ShuntServe's own workload) apply; an empty budget goes as
+   null so the server names it as missing rather than this screen guessing one. */
+function readServingForm() {
+  const body = { name: $("sv-name").value.trim(), model: {} };
+  const source = $("sv-source").value;
+  if (source === "preset") body.model.preset = $("sv-preset").value;
+  if (source === "hf") body.model.name = $("sv-hf").value.trim();
+  if (source === "url") body.model.config_url = $("sv-url").value.trim();
+  const revision = $("sv-revision").value.trim();
+  if (source === "hf" && revision) body.model.revision = revision;
+  const whole = (id) => {
+    const v = parseInt($(id).value, 10);
+    return Number.isFinite(v) ? v : null;
+  };
+  const dec = (id) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) ? v : null;
+  };
+  if (whole("sv-in") !== null) body.avg_input_tokens = whole("sv-in");
+  if (whole("sv-out") !== null) body.avg_output_tokens = whole("sv-out");
+  body.hourly_budget = dec("sv-budget");
+  if (dec("sv-max") !== null) body.max_spend_usd = dec("sv-max");
+  if ($("sv-image").value.trim()) body.image = $("sv-image").value.trim();
+  if ($("sv-token").value) body.hf_token_secret = $("sv-token").value;
+  return body;
+}
+
+/* What the serving can cost, before it is created. Same arithmetic as the server's `billing`
+   sentence (servings.billing_sentence): the hourly ceiling and 24 of them. */
+function servingCostHtml(budget, max) {
+  if (!(budget > 0)) return "";
+  return note("info",
+    `Once a plan is rented it bills at most $${budget.toFixed(2)} an hour, ` +
+    `$${(budget * 24).toFixed(2)} a day, until you delete the serving` +
+    (max > 0 ? ` or $${max.toFixed(2)} in total is spent.`
+             : ". There is no total cap unless you set one."));
+}
+
+/* Which model boxes the chosen source needs. A preset carries its own numbers, so it has
+   nothing to look up. */
+function servingSourceRules() {
+  const source = $("sv-source").value;
+  $("sv-preset-box").hidden = source !== "preset";
+  $("sv-hf-box").hidden = source !== "hf";
+  $("sv-url-box").hidden = source !== "url";
+  $("sv-rev-box").hidden = source !== "hf";
+  $("sv-lookup").hidden = source === "preset";
+  $("sv-model-note").innerHTML = "";
+}
+
+/* POST /v1/model-config's answer: the family, the eight numbers, and what was derived. */
+function modelConfigHtml(answer) {
+  const c = answer.config || {};
+  const rows = [
+    ["Architecture", c.architecture], ["Layers", c.num_layers], ["Hidden size", c.hidden_size],
+    ["Attention heads", c.num_attention_heads], ["KV heads", c.num_key_value_heads],
+    ["Head size", c.head_dim], ["MLP width", c.intermediate_size],
+    ["Vocabulary", c.vocab_size], ["dtype", c.dtype || "-"],
+  ];
+  return note("info", `${answer.name || answer.config_source}: ${answer.family}. ` +
+                      "The planner can rank plans for it.") +
+    `<div class="facts">` + rows.map(([k, v]) => fact(k, v ?? "-")).join("") + `</div>` +
+    (answer.notes || []).map((n) => `<p class="dim tiny">${esc(n)}</p>`).join("");
+}
+
+/* GET /v1/servings rows. "Now" is the rented plan's $/h, the number the bill grows by. */
+function servingRowsHtml(servings) {
+  if (!servings.length) return empty("No servings yet. The form below starts one.");
+  const rows = servings.map((s) => {
+    const chosen = s.serving_plan_chosen || {};
+    const ready = Boolean((s.endpoint || {}).ready);
+    return `<tr class="click" data-serving="${esc(s.name)}">` +
+      `<td><b>${esc(s.name)}</b></td><td>${badge(s.phase || "Accepted")}</td>` +
+      `<td>${ready ? "ready" : "not ready"}</td>` +
+      `<td class="num">${chosen.cost_per_hour != null ? "$" + esc(chosen.cost_per_hour) + "/h" : "-"}</td>` +
+      `<td class="mono small">${esc((s.model || {}).name || "")}</td>` +
+      `<td class="num">${esc(when(s.created_at))}</td></tr>`;
+  }).join("");
+  return `<div class="scroll"><table><thead><tr><th>Name</th><th>Phase</th><th>Endpoint</th>` +
+    `<th>Now</th><th>Model</th><th>Created</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function servingFactsHtml(view) {
+  const model = view.model || {};
+  return [
+    fact("Model", model.name || "-"),
+    fact("Numbers from", model.preset ? `preset ${model.preset}` : (model.config_source || "-")),
+    fact("Traffic", `${view.avg_input_tokens ?? "-"} tokens in, ${view.avg_output_tokens ?? "-"} out`),
+    fact("Hourly budget", view.hourly_budget != null ? `$${view.hourly_budget}/h` : "-"),
+    fact("Total cap", view.max_spend_usd != null ? `$${view.max_spend_usd}` : "none"),
+    fact("Created", when(view.created_at)),
+  ].join("");
+}
+
+/* The plan the operator rents, one row per machine. Rank 0 is the pipeline's first stage, the
+   one whose vLLM the endpoint reaches (status.endpoint.upstream, contract of 2026-10-20). */
+function servingChosenHtml(view) {
+  const c = view.serving_plan_chosen;
+  if (!c) {
+    return { summary: "none yet",
+             html: `<p class="dim">The operator has not chosen a plan yet.</p>` };
+  }
+  const stages = (c.stages || []).map((s, i) =>
+    `<tr><td class="num">${i}</td><td class="mono">${esc(s.instance_type)}</td>` +
+    `<td>${esc(s.cloud)} / ${esc(s.region)}</td>` +
+    `<td class="num">${esc(s.layers)}</td><td class="num">${esc(s.tp)}</td></tr>`).join("");
+  const html = `<div class="facts">` + [
+    fact("Rank", `${c.rank}, attempt ${c.attempt}`),
+    fact("Score", c.score != null ? `${c.score} req/s per $/h` : "-"),
+    fact("Price", c.cost_per_hour != null ? `$${c.cost_per_hour}/h` : "-"),
+    fact("Estimated", `${c.throughput_rps ?? "-"} req/s, ` +
+      (c.latency_seconds != null ? `${c.latency_seconds} s` : "latency -")),
+  ].join("") + `</div>` +
+    `<div class="scroll"><table><thead><tr>` +
+    `<th title="The pipeline rank. Rank 0's vLLM is the one the endpoint reaches.">Rank</th>` +
+    `<th>Machine</th><th>Where</th><th>Layers</th><th>TP</th></tr></thead>` +
+    `<tbody>${stages}</tbody></table></div>`;
+  return { summary: `rank ${c.rank}, $${c.cost_per_hour}/h, attempt ${c.attempt}`, html };
+}
+
+/* When the operator says a plan cannot be rented, what the plan IS: its pipelines, machines
+   and seller. Not a reason of this screen's own -- which of those facts the operator's rule
+   turns on is the operator's to say -- but the facts a reader needs to see it. */
+function whyNotRented(plan) {
+  if (plan.executable !== false) return "";
+  const pipes = plan.pipelines || [];
+  const facts = [];
+  if (pipes.some((q) => q.vendor === "aws")) facts.push("priced from AWS's table");
+  if (pipes.length > 1) facts.push(`${pipes.length} pipelines`);
+  if ((plan.nodes || 0) > 1) facts.push(`${plan.nodes} machines`);
+  return facts.join(", ");
+}
+
+/* The ranked plans, one row each. Rank 1 is the best SCORE, not the cheapest (HYPERUN-SERVING-
+   PLAN in servingPlanHtml above says why), so the score column comes first after the rank. */
+function servingPlansHtml(view) {
+  const plans = view.serving_plans || [];
+  const chosen = view.serving_plan_chosen || null;
+  const catalog = view.serving_catalog
+    ? `<p class="dim tiny">Ranked on: ${esc(view.serving_catalog)}</p>` : "";
+  if (!plans.length) {
+    return { summary: "no plans yet",
+             html: catalog + `<p class="dim">The planner has not answered yet.</p>` };
+  }
+  const rows = plans.map((p) => {
+    const isChosen = Boolean(chosen) && chosen.rank === p.rank;
+    const rentable = p.executable === true ? "yes" : p.executable === false
+      ? `no <span class="dim tiny">${esc(whyNotRented(p))}</span>` : "-";
+    return `<tr${isChosen ? ' class="chosen"' : ""}>` +
+      `<td class="num">${esc(p.rank)}${isChosen ? ' <span class="tiny"><b>chosen</b></span>' : ""}</td>` +
+      `<td class="num">${esc(p.score ?? "-")}</td>` +
+      `<td class="num">${p.cost_per_hour != null ? "$" + esc(p.cost_per_hour) : "-"}</td>` +
+      `<td class="num">${esc(p.throughput_rps ?? "-")}</td>` +
+      `<td class="num">${p.latency_seconds != null ? esc(p.latency_seconds) + " s" : "-"}</td>` +
+      `<td class="num">${esc(p.nodes ?? "-")}</td><td>${rentable}</td></tr>`;
+  }).join("");
+  const best = plans.reduce((a, b) => (b.rank < a.rank ? b : a));
+  return {
+    summary: `${plans.length} plan${plans.length === 1 ? "" : "s"}, rank ${best.rank} ` +
+      (best.score != null ? `scores ${best.score} at ` : "is ") + `$${best.cost_per_hour}/h`,
+    html: catalog + `<div class="scroll"><table><thead><tr><th>Rank</th>` +
+      `<th title="Estimated requests per second per dollar-hour: the number the ranks are sorted by">Score</th>` +
+      `<th>$/h</th><th>req/s</th><th>Latency</th><th>VMs</th>` +
+      `<th title="Whether the operator can rent and run this plan. When it cannot, the plan's shape is shown.">Rentable</th>` +
+      `</tr></thead><tbody>${rows}</tbody></table></div>`,
+  };
+}
+
+/* Clear the key from the page. Called by Hide, by drawServing, and by route() on every
+   navigation, so a key shown once does not survive into a screen that did not ask for it. */
+function hideServingKey() {
+  $("sv-d-key-value").textContent = "";
+  $("sv-d-key").hidden = true;
+  $("sv-d-key-toggle").textContent = "Show API key";
+  $("sv-d-key-note").innerHTML = "";
+}
+
+async function drawServingForm() {
+  servingSourceRules();
+  $("sv-cost").innerHTML = servingCostHtml(parseFloat($("sv-budget").value),
+                                           parseFloat($("sv-max").value));
+  if (servingFormDrawn) return;
+  try {
+    const guide = await call("/v1/serving-models");
+    $("sv-preset").innerHTML = (guide.presets || []).map((p) =>
+      `<option value="${esc(p.preset)}"${p.preset === guide.recommended ? " selected" : ""}>` +
+      `${esc(p.preset)} (${esc(p.name)})${p.gated ? ", gated" : ""}</option>`).join("");
+    $("sv-recommend").textContent = guide.recommended ? `recommended: ${guide.recommended}` : "";
+    $("sv-recommend").title = guide.recommendation || "";
+    servingFormDrawn = true;
+  } catch (err) {
+    $("sv-model-note").innerHTML = note("err", err.message);
+  }
+  try {
+    const own = (await call("/v1/secrets")).own || [];
+    $("sv-token").innerHTML = `<option value="">None</option>` + own.map((n) =>
+      `<option value="${esc(n)}"${n === "HF_TOKEN" ? " selected" : ""}>${esc(n)}</option>`).join("");
+  } catch { /* the select keeps None, which is a valid choice */ }
+}
+
+function drawServings(arg) {
+  $("sv-list-view").hidden = Boolean(arg);
+  $("sv-detail-view").hidden = !arg;
+  if (arg) {
+    drawServing(arg);
+    return;
+  }
+  drawServingForm();
+  poll.every(15, async () => {
+    try {
+      const answer = await call("/v1/servings");
+      const rows = answer.servings || [];
+      $("sv-count").textContent = `${rows.length} serving${rows.length === 1 ? "" : "s"}`;
+      $("sv-body").innerHTML = servingRowsHtml(rows);
+      $("sv-body").querySelectorAll("tr[data-serving]").forEach((tr) => {
+        tr.onclick = () => go("servings", tr.dataset.serving);
+      });
+    } catch (err) {
+      $("sv-body").innerHTML = note("err", err.message);
+    }
+  });
+}
+
+function drawServing(name) {
+  hideServingKey();
+  $("sv-d-name").textContent = name;
+  ["sv-d-badge", "sv-d-model", "sv-d-facts", "sv-d-message", "sv-d-chosen", "sv-d-plans"]
+    .forEach((id) => { $(id).innerHTML = ""; });
+  $("sv-d-url").textContent = "-";
+  poll.every(10, async () => {
+    let view;
+    try {
+      view = await call(`/v1/servings/${encodeURIComponent(name)}`);
+    } catch (err) {
+      $("sv-d-message").innerHTML = note("err", err.message);
+      return;
+    }
+    // The reader may have opened another serving while this was in flight.
+    if ($("sv-d-name").textContent !== name) return;
+    const endpoint = view.endpoint || {};
+    $("sv-d-badge").innerHTML = badge(view.phase || "Accepted");
+    $("sv-d-model").textContent = (view.model || {}).name || "";
+    $("sv-d-facts").innerHTML = servingFactsHtml(view);
+    $("sv-d-message").innerHTML = (view.billing ? note("info", view.billing) : "") +
+      (view.message ? note("warn", view.message) : "");
+    $("sv-d-url").textContent = store.server + (endpoint.path || "");
+    $("sv-d-ready").textContent = endpoint.ready ? "ready" : "not ready yet: it answers 503 until it is";
+    const chosen = servingChosenHtml(view);
+    $("sv-d-chosen-note").textContent = chosen.summary;
+    $("sv-d-chosen").innerHTML = chosen.html;
+    const plans = servingPlansHtml(view);
+    $("sv-d-plans-note").textContent = plans.summary;
+    $("sv-d-plans").innerHTML = plans.html;
+  });
+}
+
+$("sv-source").onchange = servingSourceRules;
+["sv-budget", "sv-max"].forEach((id) => {
+  $(id).oninput = () => {
+    $("sv-cost").innerHTML = servingCostHtml(parseFloat($("sv-budget").value),
+                                             parseFloat($("sv-max").value));
+  };
+});
+
+$("sv-lookup").onclick = async () => {
+  const body = readServingForm();
+  const ask = body.model.config_url ? { config_url: body.model.config_url }
+                                    : { model: body.model.name, revision: body.model.revision };
+  if (body.hf_token_secret) ask.hf_token_secret = body.hf_token_secret;
+  $("sv-model-note").innerHTML = `<p class="dim">Reading config.json...</p>`;
+  try {
+    const answer = await call("/v1/model-config", { method: "POST", body: JSON.stringify(ask) });
+    $("sv-model-note").innerHTML = modelConfigHtml(answer);
+  } catch (err) {
+    $("sv-model-note").innerHTML = note("err", err.message);
+  }
+};
+
+$("sv-create").onclick = async () => {
+  $("sv-create").disabled = true;
+  $("sv-create-note").innerHTML = "";
+  try {
+    const view = await call("/v1/servings", { method: "POST", body: JSON.stringify(readServingForm()) });
+    go("servings", view.name);
+  } catch (err) {
+    $("sv-create-note").innerHTML = note("err", err.message);
+  } finally {
+    $("sv-create").disabled = false;
+  }
+};
+
+$("sv-d-key-toggle").onclick = async () => {
+  if (!$("sv-d-key").hidden) {
+    hideServingKey();
+    return;
+  }
+  const name = $("sv-d-name").textContent;
+  try {
+    const answer = await call(`/v1/servings/${encodeURIComponent(name)}/api-key`);
+    if ($("sv-d-name").textContent !== name) return;
+    $("sv-d-key-value").textContent = answer.api_key;
+    $("sv-d-key").hidden = false;
+    $("sv-d-key-toggle").textContent = "Hide API key";
+  } catch (err) {
+    $("sv-d-key-note").innerHTML = note("err", err.message);
+  }
+};
+
+$("sv-d-delete").onclick = async () => {
+  const name = $("sv-d-name").textContent.trim();
+  if (!name || !window.confirm(
+        `Delete serving ${name}?\n\nIts machines are given back and its billing stops. The ` +
+        `endpoint and its API key stop working.`)) return;
+  $("sv-d-delete").disabled = true;
+  try {
+    await call(`/v1/servings/${encodeURIComponent(name)}`, { method: "DELETE" });
+    poll.stop();
+    go("servings");
+  } catch (err) {
+    $("sv-d-message").innerHTML = note("err", err.message);
+  } finally {
+    $("sv-d-delete").disabled = false;
+  }
+};
+
 /* ------------------------------------------------------------ 3b. Scripts */
 
 /* HYPERUN-SCRIPTS. Every run.sh in one namespace, GROUPED BY THE PERSON WHO RAN IT.
@@ -1766,6 +2338,24 @@ function readForm() {
   if (num("f-rowtokens")) t.row_tokens = num("f-rowtokens");
   if (num("f-cap")) t.cap = num("f-cap");
   if (num("f-batch")) t.batch_size = num("f-batch");
+
+  /* HYPERUN-SERVING-PLAN. The model box is the switch: empty sends no block at all. An empty
+     number box goes out as null rather than being left out or defaulted, so /v1/validate names
+     the missing field (serving-plan-tokens and the rest) instead of this screen guessing a
+     value; the placeholders are examples, not defaults. The two rates are decimals, read with
+     parseFloat, because 2.5 req/s and $20.8333/h are ordinary asks. */
+  if ($("f-serve-model").value) {
+    const dec = (id) => {
+      const v = parseFloat($(id).value);
+      return Number.isFinite(v) ? v : null;
+    };
+    body.serving_plan = {
+      model: $("f-serve-model").value,
+      avg_input_tokens: num("f-serve-in"),
+      avg_output_tokens: num("f-serve-out"),
+      hourly_budget: dec("f-serve-budget"),
+    };
+  }
 
   return body;
 }
@@ -2117,7 +2707,9 @@ $("s1-reset").onclick = () => {
   // longer exists throws on $(id).value, which would have left every field after
   // it uncleared.
   ["f-name", "f-image", "f-command", "f-env",
-   "f-pairs", "f-epochs", "f-rowtokens", "f-cap", "f-batch"].forEach((id) => { $(id).value = ""; });
+   "f-pairs", "f-epochs", "f-rowtokens", "f-cap", "f-batch",
+   "f-serve-model", "f-serve-in", "f-serve-out", "f-serve-budget",
+  ].forEach((id) => { $(id).value = ""; });
   $("f-command-note").innerHTML = "";
   $("f-gpucount").value = 1;
   $("f-parallelism").value = 1;
@@ -2131,7 +2723,9 @@ $("s1-reset").onclick = () => {
   // put the next submission back on `ordered` without saying so.
   $("f-mode").value = "cheapest";
   document.querySelectorAll("#view-submit [data-vendor]").forEach((b) => { b.checked = false; });
-  vendorRules();
+  // HYPERUN-SERVING-PLAN. The model box is now empty, so this gives back the boxes a serving
+  // plan disabled, and runs vendorRules as well.
+  servingRules();
   $("s1-err").innerHTML = "";
 };
 
@@ -2167,9 +2761,68 @@ function vendorRules() {
   }
 }
 
+/* HYPERUN-SERVING-PLAN. What choosing a model does to the rest of the form, and the one line
+   that says which of the two things this job will do.
+
+   FORCED, LIKE vendorRules ABOVE, AND FOR THE SAME REASON: a box whose only outcome is a refusal
+   should not be offered. PACSrun plans a serving plan only on-demand (Shadeform sells nothing
+   else) and only for regions [shadeform] (validateServingPlan), and the planner picks the GPUs,
+   so spot, a vendor box, a region or a GPU is refused or ignored by the server
+   (check_serving_plan). Capacity is set to on-demand with spot disabled, parallelism to 1; the
+   vendor boxes, the regions and the GPU are emptied and disabled. Clearing the model gives them
+   all back.
+
+   THE MODE IS LEFT ALONE, because it decides whether money is spent and that is the person's
+   call: compare ranks the plans and rents nothing, any other mode rents the highest-score plan
+   that runs on one machine. The note says which, and this runs on every mode change to keep it true.
+
+   It calls vendorRules, so it is also the mode select's handler. */
+function servingRules() {
+  const on = Boolean($("f-serve-model").value);
+  const capacity = $("f-capacity");
+  if (on) capacity.value = "on-demand";
+  Array.from(capacity.options).forEach((o) => { o.disabled = on && o.value !== "on-demand"; });
+  document.querySelectorAll("#view-submit [data-vendor]").forEach((b) => {
+    if (on) b.checked = false;
+    b.disabled = on;
+  });
+  ["f-regions", "f-gpu"].forEach((id) => {
+    if (on) $(id).value = "";
+    $(id).disabled = on;
+  });
+  // A rented plan is one machine running one pod, and PACSrun refuses a renting serving job
+  // whose parallelism is not 1 (placement.go, HYPERUN-SHUNTSERVE-EXECUTE).
+  if (on) $("f-parallelism").value = 1;
+  $("f-parallelism").disabled = on;
+  vendorRules();
+
+  // Folded, the section still sends what is in it, so its summary says so.
+  const summary = $("f-serving")?.querySelector(".acc-note");
+  if (summary) {
+    summary.textContent = on
+      ? `${$("f-serve-model").value}, sent with this job`
+      : "optional: which Shadeform machines serve a model best per dollar";
+  }
+  if (!on) {
+    $("f-serve-note").innerHTML = "";
+    return;
+  }
+  const compare = $("f-mode").value === "compare";
+  $("f-serve-note").innerHTML = note("info",
+    "Capacity is on-demand, parallelism is 1 and the planner picks Shadeform machines, so " +
+    "vendors, regions and GPU are set aside. " + (compare
+      ? "Placement is compare: the planner ranks up to 50 plans and nothing is rented."
+      : `Placement is ${$("f-mode").value || "ordered"}: the operator rents the highest-score ` +
+        "plan (most requests per second per dollar within your hourly budget) that runs on one " +
+        "machine and runs this image there, billed by the hour, and tries the " +
+        "next one-machine plan if that rental fails. Choose compare under Placement to see the " +
+        "plans first."));
+}
+
 document.querySelectorAll("#view-submit [data-vendor]")
   .forEach((b) => { b.onchange = vendorRules; });
-$("f-mode").onchange = vendorRules;
+$("f-mode").onchange = servingRules;
+$("f-serve-model").onchange = servingRules;
 
 $("s2-back").onclick = () => step(1);
 $("s3-back").onclick = () => step(2);
@@ -2589,6 +3242,17 @@ $("d-again").onclick = () => {
   // design. Carry the name across with an empty value and let the user fill it.
   $("f-env").value = (sp.env || [])
     .map((x) => x.fromSecret ? `${x.name}=` : `${x.name}=${x.value ?? ""}`).join("\n");
+
+  // HYPERUN-SERVING-PLAN. The operator's camelCase block back into the four boxes, then the
+  // same rules a model chosen by hand applies. A job without one clears them. A job submitted
+  // before 2026-10-20 may carry targetRPS; it is not carried across, because the server now
+  // refuses it (serving-plan-target-rps-removed).
+  const serving = pl.servingPlan || {};
+  $("f-serve-model").value = serving.model || "";
+  $("f-serve-in").value = serving.avgInputTokens ?? "";
+  $("f-serve-out").value = serving.avgOutputTokens ?? "";
+  $("f-serve-budget").value = serving.hourlyBudget ?? "";
+  servingRules();
   step(1);
   go("submit");
 };
@@ -2636,6 +3300,10 @@ function drawOpenState(jobId, job) {
   const open = (id, on) => { const el = $(id); if (el) el.open = on; };
 
   open("d-compare-panel", phase === "Compared");
+  // Open whenever they are shown: each is hidden for a job it has nothing to say about, and for
+  // a serving job each is the answer the page was opened for (HYPERUN-SERVING-PLAN).
+  open("d-serving-panel", true);
+  open("d-servecheck-panel", true);
   open("d-progress-panel", running);
   open("d-gpu-panel", running);
   open("d-learning-panel", running);
@@ -3043,7 +3711,7 @@ function showApp(on) {
   if (on) {
     // HYPERUN-WHO. This line used to read
     //     store.server.replace(/^https?:\/\//, "").slice(0, 32)
-    // which printed `api.hyperun.ddps.cloud` in the corner 15.5 reserved for the
+    // which printed `api.<your-domain>` in the corner 15.5 reserved for the
     // team every screen inherits. The hostname is not something a reader on this
     // screen can act on, and it was the only thing here. The email is known from
     // the token without a request; the team arrives with the first /v1/stats and

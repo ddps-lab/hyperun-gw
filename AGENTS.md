@@ -32,6 +32,15 @@ the answer is what no check could see. Passing does not mean complete.
 **One command does not exist yet:** `gpus` (the GPUs you can rent, and their prices). It needs the
 server to hold vendor API keys and a catalog cache.
 
+## When the user wants a model served behind an endpoint
+
+That is a **serving**, not a job: `hyperun serving-models`, then `hyperun model-config <hf id or
+config.json URL>` (or read config.json yourself; the mapping is in
+`agent/skills/hyperun/SKILL.md`, "Serving a model behind an endpoint"), then
+`hyperun serving-create`. **A serving bills by the hour until it is deleted**: say the daily
+ceiling (hourly budget x 24) before creating one. Mixture-of-experts models and architectures
+outside the listed dense families are refused; pass the refusal on.
+
 ## When you read a user's repository to write a training script
 
 Read `agent/references/script-contract.md`. **Every rule in it has actually been broken**, so

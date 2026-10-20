@@ -257,7 +257,7 @@ nav button.on { background: var(--primary-soft); color: var(--primary); }
 .spacer { flex: 1; }
 
 /* The right-hand end of the bar: who you are, the theme, the way out. It used
-   to open with the API hostname (`api.hyperun.ddps.cloud`), which is neither
+   to open with the API hostname (`api.<your-domain>`), which is neither
    something a reader can act on nor the thing 15.5 put in this corner -- that
    is the team. */
 .who {
@@ -519,6 +519,14 @@ tbody tr.click:hover td { background: var(--bg); }
 /* Only a failed row carries the left stripe, so the state is visible as shape
    and not only as colour. */
 tbody tr.failed td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+
+/* HYPERUN-SERVING-PLAN. The plan the operator rented. A SELECTION, not a state, so it takes the
+   tint nav uses for "you are here" and no status colour; the rank cell also says "chosen" in
+   words, so the row is findable without seeing colour. No stripe: that shape belongs to a
+   failed row, above. A plan with two pipelines is two rows, so the class sits on both. */
+tbody tr.chosen td { background: var(--primary-soft); }
+/* A cell that spans its plan's pipeline rows sits at the top of the span. */
+td.span-top { vertical-align: top; }
 
 td .name { font-weight: 500; }
 

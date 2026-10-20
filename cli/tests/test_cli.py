@@ -116,10 +116,51 @@ class FakeClient:
         self.execed.append((job, line, slot, session, seq))
         return self.exec_result
 
+    # HYPERUN-SERVING. The same names and arguments as Client's serving methods.
+    server = "https://run.example"
+    created_servings: list = []
+    deleted_servings: list = []
+    serving_view: dict = {}
+    model_config_bodies: list = []
+
+    def serving_models(self):
+        return {"presets": [{"preset": "llama-3.1-8b", "name": "meta-llama/Llama-3.1-8B-Instruct",
+                             "gated": True}],
+                "families": [{"family": "Qwen3 dense", "architecture": "Qwen3ForCausalLM",
+                              "example": "Qwen/Qwen3-8B"}],
+                "recommended": "llama-3.1-8b", "recommendation": "llama-3.1-8b, unless ...",
+                "refused": "mixture-of-experts models"}
+
+    def model_config(self, body):
+        self.model_config_bodies.append(body)
+        return {"name": "Qwen/Qwen3-8B", "revision": "", "family": "Qwen3 dense",
+                "config_source": "https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json",
+                "config": {"architecture": "Qwen3ForCausalLM", "num_layers": 36},
+                "spec_config": {}, "notes": ["head_dim is absent, so it is 128."]}
+
+    def create_serving(self, body):
+        self.created_servings.append(body)
+        return {**self.serving_view, "name": body["name"]}
+
+    def servings(self):
+        return {"servings": [self.serving_view] if self.serving_view else [], "total": 1}
+
+    def serving(self, name):
+        return self.serving_view
+
+    def delete_serving(self, name):
+        self.deleted_servings.append(name)
+
+    def serving_key(self, name):
+        return {"api_key": "sk-serving-test", "endpoint_path": f"/v1/servings/lab-alice/{name}/v1"}
+
 
 @pytest.fixture
 def fake(monkeypatch):
     client = FakeClient()
+    # Per test, not shared through the class attributes above.
+    client.created_servings, client.deleted_servings, client.model_config_bodies = [], [], []
+    client.serving_view = dict(SERVING_VIEW)
     monkeypatch.setattr(cli, "client_from_config", lambda: client)
     return client
 
@@ -1528,3 +1569,191 @@ def test_a_job_without_a_pin_does_not_ask_for_the_schema(fake):
         raise AssertionError("the schema was fetched for a job that pins nothing")
     fake.schema = no_schema
     assert run(["submit", "--name", "x", "--image", "i"]) == cli.EXIT_OK
+
+
+# ------------------------------------------------------------ HYPERUN-SERVING
+
+SERVING_VIEW = {
+    "name": "chat-8b", "namespace": "lab-alice", "phase": "Serving",
+    "model": {"name": "meta-llama/Llama-3.1-8B-Instruct", "preset": "llama-3.1-8b"},
+    "serving_plans": [{"rank": 1, "score": "12.558", "cost_per_hour": "1.3500",
+                       "throughput_rps": "16.953"}],
+    "serving_plan_chosen": {"rank": 1, "score": "12.558", "cost_per_hour": "1.3500",
+                            "throughput_rps": "16.953", "attempt": 1,
+                            "stages": [{"cloud": "hyperstack", "region": "montreal-canada-2",
+                                        "instance_type": "A100_80G", "layers": 32, "tp": 1}]},
+    "serving_catalog": "Shadeform catalog fetched 2026-10-20T02:39:32Z",
+    "endpoint": {"path": "/v1/servings/lab-alice/chat-8b/v1", "ready": True},
+    "billing": "Renting $1.35/h now (rank 1), $32.40 a day. There is no total cap: it runs "
+               "until you delete it.",
+}
+
+
+def test_serving_create_sends_the_flags_and_leaves_defaults_to_the_server(fake, capsys):
+    assert run(["serving-create", "chat-8b", "--preset", "llama-3.1-8b",
+                "--hourly-budget", "3"]) == cli.EXIT_OK
+    # No token averages: the server's defaults (763 / 232) apply, and the server says them.
+    assert fake.created_servings == [{"name": "chat-8b", "model": {"preset": "llama-3.1-8b"},
+                                      "hourly_budget": 3.0}]
+    out = capsys.readouterr().out
+    assert "endpoint   https://run.example/v1/servings/lab-alice/chat-8b/v1" in out
+    assert "billing    Renting $1.35/h now (rank 1), $32.40 a day." in out
+    assert "hyperun serving-delete chat-8b" in out
+
+
+def test_serving_create_merges_a_file_and_the_flags_win(fake, tmp_path):
+    path = tmp_path / "serve.yaml"
+    path.write_text("name: from-file\nmodel:\n  name: Qwen/Qwen3-8B\n  config:\n"
+                    "    architecture: Qwen3ForCausalLM\nhourly_budget: 2\n"
+                    "avg_input_tokens: 512\n")
+    assert run(["serving-create", "-f", str(path), "--hourly-budget", "2.5",
+                "--hf-token-secret", "HF_TOKEN", "--max-spend", "40"]) == cli.EXIT_OK
+    sent = fake.created_servings[0]
+    assert sent["name"] == "from-file" and sent["hourly_budget"] == 2.5
+    assert sent["model"]["config"] == {"architecture": "Qwen3ForCausalLM"}
+    assert (sent["avg_input_tokens"], sent["hf_token_secret"], sent["max_spend_usd"]) == \
+        (512, "HF_TOKEN", 40.0)
+
+
+def test_serving_create_without_a_name_is_a_usage_error(fake, capsys):
+    assert run(["serving-create", "--preset", "llama-3.1-8b"]) == cli.EXIT_USAGE
+    assert "needs a name" in capsys.readouterr().err
+    assert fake.created_servings == []
+
+
+def test_serving_status_names_the_machines_the_score_the_catalog_and_the_bill(fake, capsys):
+    assert run(["serving-status", "chat-8b"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "endpoint   https://run.example/v1/servings/lab-alice/chat-8b/v1  (ready)" in out
+    assert "rank 1: $1.3500/h, estimated 16.953 req/s, score 12.558, attempt 1" in out
+    assert "machine  A100_80G (hyperstack / montreal-canada-2), 32 layers, TP 1" in out
+    assert "catalog    Shadeform catalog fetched" in out and "billing    Renting $1.35/h" in out
+    assert "cheapest" not in out
+
+
+def test_servings_lists_one_line_each(fake, capsys):
+    assert run(["servings"]) == cli.EXIT_OK
+    line = capsys.readouterr().out.strip()
+    assert line.split()[:4] == ["chat-8b", "Serving", "ready", "$1.3500/h"]
+
+
+def test_serving_key_prints_the_two_names_openai_sdks_read(fake, capsys):
+    assert run(["serving-key", "chat-8b"]) == cli.EXIT_OK
+    assert capsys.readouterr().out.splitlines() == [
+        "OPENAI_BASE_URL=https://run.example/v1/servings/lab-alice/chat-8b/v1",
+        "OPENAI_API_KEY=sk-serving-test"]
+
+
+def test_serving_delete_asks_first_and_yes_skips_it(fake, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    assert run(["serving-delete", "chat-8b"]) == cli.EXIT_USAGE
+    assert fake.deleted_servings == []
+    assert run(["serving-delete", "chat-8b", "-y"]) == cli.EXIT_OK
+    assert fake.deleted_servings == ["chat-8b"]
+
+
+@pytest.mark.parametrize("given, sent", [
+    ("Qwen/Qwen3-8B", {"model": "Qwen/Qwen3-8B"}),
+    ("https://models.example.com/config.json",
+     {"config_url": "https://models.example.com/config.json"}),
+])
+def test_model_config_tells_an_id_from_a_url(fake, capsys, given, sent):
+    assert run(["model-config", given]) == cli.EXIT_OK
+    assert fake.model_config_bodies == [sent]
+    out = capsys.readouterr().out
+    assert "num_layers" in out and "note: head_dim is absent" in out
+
+
+def test_model_config_passes_the_token_name_and_a_refusal_exits_1(fake, capsys):
+    def refuse(body):
+        raise ServerError("[model-config-gated] meta-llama/Llama-3.1-8B-Instruct is gated")
+    fake.model_config = refuse
+    assert run(["model-config", "meta-llama/Llama-3.1-8B-Instruct",
+                "--hf-token-secret", "HF_TOKEN"]) == cli.EXIT_SERVER
+    assert "[model-config-gated]" in capsys.readouterr().err
+
+
+def test_serving_models_prints_presets_families_and_the_recommendation(fake, capsys):
+    assert run(["serving-models"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "llama-3.1-8b" in out and "Qwen3 dense" in out and "recommended:" in out
+
+
+# ------------------------------------------------------------ HYPERUN-SERVING-PLAN
+
+SERVING_FLAGS = ["--serving-model", "llama-3.1-8b", "--avg-input-tokens", "763",
+                 "--avg-output-tokens", "232", "--hourly-budget", "20.8333"]
+
+
+def test_the_serving_flags_build_the_servers_serving_plan_block():
+    body = cli.build_submit_body(args_for(["submit", "--name", "x", "--image", "i"]
+                                          + SERVING_FLAGS))
+    assert body["serving_plan"] == {"model": "llama-3.1-8b", "avg_input_tokens": 763,
+                                    "avg_output_tokens": 232, "hourly_budget": 20.8333}
+    # Nothing else is invented here: the server fills capacity type and region.
+    assert "capacity_type" not in body and "regions" not in body
+
+
+def test_a_flag_overrides_one_field_of_the_files_serving_plan(tmp_path):
+    job = tmp_path / "serve.yaml"
+    job.write_text("name: serve\nimage: vllm/vllm-openai:v0.10.0\nserving_plan:\n"
+                   "  model: llama-3.1-70b\n  avg_input_tokens: 763\n  avg_output_tokens: 232\n"
+                   "  hourly_budget: 20.8333\n")
+    body = cli.build_submit_body(args_for(["submit", "-f", str(job), "--hourly-budget", "4.67"]))
+    assert body["serving_plan"]["hourly_budget"] == 4.67
+    assert body["serving_plan"]["model"] == "llama-3.1-70b"
+    assert body["serving_plan"]["avg_input_tokens"] == 763
+
+
+def test_there_is_no_target_rate_flag_any_more(capsys):
+    """HYPERUN-SERVING-PLAN. PACSrun ranks by score under the hourly budget since 2026-10-19 and
+    has no target rate, so the flag is gone; argparse refuses it rather than this CLI sending
+    a field the server would refuse anyway."""
+    with pytest.raises(SystemExit):
+        args_for(["submit", "--name", "x", "--image", "i", "--target-rps", "2.0"])
+    assert "--target-rps" in capsys.readouterr().err
+
+
+def test_a_job_without_serving_flags_sends_no_serving_plan():
+    body = cli.build_submit_body(args_for(["submit", "--name", "x", "--image", "i"]))
+    assert "serving_plan" not in body
+
+
+@pytest.mark.parametrize("command", ["submit", "validate", "estimate"])
+def test_a_server_that_does_not_know_serving_plan_is_never_sent_one(fake, capsys, command):
+    # That server would drop the block and run the image as an ordinary job.
+    fake.schema = lambda: {"properties": {"name": {}, "image": {}, "instance_type": {}}}
+    sent = []
+    fake.validate = fake.estimate = lambda body: sent.append(body)
+    assert run([command, "--name", "x", "--image", "i"] + SERVING_FLAGS) == cli.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "does not know serving_plan" in err and "--serving-model" in err
+    assert fake.submitted is None and sent == []
+
+
+def test_status_names_the_rented_plan_the_best_scored_one_and_the_catalog(fake, capsys):
+    fake.status_result = {
+        "job_id": "job-a8acdef80a07", "name": "serve", "phase": "Running",
+        "serving_plan_chosen": {"rank": 2, "instance_type": "A100_sxm4_80Gx8_2",
+                                "cloud": "excesssupply", "region": "omaha-usa-2",
+                                "cost_per_hour": "10.8000", "throughput_rps": "12.283",
+                                "latency_seconds": "2.042", "score": "1.137", "attempt": 2},
+        "serving_plans": [{"rank": 1, "score": "1.540", "cost_per_hour": "8.0700",
+                           "throughput_rps": "12.430", "nodes": 5, "pipelines": []}],
+        "serving_catalog": "Shadeform catalog fetched 2026-10-20T02:39:32Z (live ConfigMap "
+                           "hyperun-shadeform-catalog)",
+    }
+    assert run(["status", "job-a8acdef80a07"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert ("serving    plan 2: A100_sxm4_80Gx8_2 (excesssupply / omaha-usa-2), "
+            "$10.8000/h, estimated 12.283 req/s, score 1.137, attempt 2") in out
+    assert ("1 ranked; rank 1 is $8.0700/h for 12.430 req/s on 5 machine(s) "
+            "(score 1.540 req/s per $/h)") in out
+    assert "cheapest" not in out
+    assert "catalog    Shadeform catalog fetched 2026-10-20T02:39:32Z" in out
+
+
+def test_status_of_an_ordinary_job_says_nothing_about_serving(fake, capsys):
+    assert run(["status", "job-a8acdef80a07"]) == cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "serving" not in out and "plans" not in out

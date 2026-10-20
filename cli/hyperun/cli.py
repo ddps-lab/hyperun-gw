@@ -33,6 +33,10 @@ THE COMMANDS, AND WHY EACH EXISTS
   stats             what your team has spent. Aggregate only: being on a team
                     does not let you read a member's jobs.
   logs              output, optionally followed.
+  servings, serving-create / -status / -delete / -key, serving-models, model-config
+                    a model served behind an OpenAI-compatible endpoint
+                    (HYPERUN-SERVING): create it within an hourly budget, read
+                    its plans and its endpoint, print its API key, delete it.
 
 WHAT IS NOT HERE. No `gpus`. Answering it needs a vendor API key in the server
 and a catalogue cache, and a CLI that answered it locally would be the second
@@ -174,6 +178,29 @@ def job_arguments() -> argparse.ArgumentParser:
         "solver choose: a pinned job runs on this type or waits. AWS only, and not "
         "with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says "
         "whether PACSrun can place it and how many machines the job rents.",
+    )
+    # HYPERUN-SERVING-PLAN. The request's `serving_plan` block, one flag per field. Any of them
+    # turns the block on; the server answers a missing one with a validate finding that names
+    # it, so nothing here decides which are required. The model names are NOT argparse choices,
+    # for the reason --vendor's are not: the server owns the list and names the good ones.
+    shared.add_argument(
+        "--serving-model", metavar="NAME",
+        help="ask the ShuntServe planner which Shadeform machines serve this model with the "
+        "most requests per second per dollar-hour within --hourly-budget, instead of naming a "
+        "GPU: llama-3.1-8b or llama-3.1-70b. There is no target request rate; each plan's rate "
+        "is its estimate. The job goes out on-demand on shadeform, so leave --capacity-type, "
+        "--vendor, --region and --gpu-* out. With --placement-mode compare the plans are only "
+        "ranked; otherwise the highest-score plan that runs on one machine is rented, and "
+        "--parallelism must stay 1.",
+    )
+    shared.add_argument("--avg-input-tokens", type=int, metavar="N",
+                        help="serving plan: average prompt length of the traffic, in tokens")
+    shared.add_argument("--avg-output-tokens", type=int, metavar="N",
+                        help="serving plan: average answer length of the traffic, in tokens")
+    shared.add_argument(
+        "--hourly-budget", type=float, metavar="USD",
+        help="serving plan: the most a plan may cost, US dollars PER HOUR for all its machines "
+        "together. An hourly rate; there is no total budget or duration.",
     )
     shared.add_argument(
         "--expected-hours", type=float, help="your own guess at the runtime, in hours"
@@ -452,6 +479,93 @@ def build_parser() -> argparse.ArgumentParser:
         help="how often to ask, with --follow (default 6)",
     )
 
+    # HYPERUN-SERVING. A model behind an OpenAI-compatible endpoint. Flat names, the way
+    # `secrets` / `secret-set` / `secret-rm` are: the reference generator
+    # (agent/scripts/generate_references.py) walks ONE level of subcommands, so a nested
+    # `serving create` would be missing from cli.md.
+    sub.add_parser(
+        "serving-models", help="which models a serving can use, and which one to start with",
+        description="The planner's presets with their numbers, the dense model families known "
+        "to plan correctly, and a recommendation. Asks the server; nothing is created.",
+    )
+    model_config = sub.add_parser(
+        "model-config", help="read a model's config.json and print the numbers a serving needs",
+        description="The server reads config.json from Hugging Face (or the URL you give) and "
+        "answers the model's structure, or says why it cannot be planned: a mixture-of-experts "
+        "model, an unsupported architecture, a missing number, or a gated repository without a "
+        "token. Nothing is created.",
+    )
+    model_config.add_argument(
+        "model", help="a Hugging Face id (Qwen/Qwen3-8B) or an https URL to a config.json")
+    model_config.add_argument("--revision", help="a branch, tag or commit of the id")
+    model_config.add_argument(
+        "--hf-token-secret", metavar="NAME",
+        help="the NAME of a token you registered with `secret-set` (e.g. HF_TOKEN), for a "
+        "gated repository. The value is read on the server and sent to huggingface.co only.")
+    add_json_flag(model_config)
+
+    serving_create = sub.add_parser(
+        "serving-create", help="serve a model behind an endpoint; it bills by the hour until "
+        "you delete it",
+        description="Creates a serving. The planner ranks plans by requests per second per "
+        "dollar-hour within --hourly-budget, the operator rents the best one and starts vLLM, "
+        "and the endpoint answers once `serving-status` says ready. ★ IT KEEPS BILLING UNTIL "
+        "`serving-delete` (or --max-spend). Give exactly one of --preset, --model and "
+        "--config-url, or a file with -f; flags win over the file.",
+    )
+    serving_create.add_argument(
+        "name", nargs="?",
+        help="lowercase letters, digits and '-', at most 40; part of the endpoint URL")
+    serving_create.add_argument("-f", "--file", metavar="PATH",
+                                help="a YAML or JSON body, as POST /v1/servings takes it")
+    serving_create.add_argument("--preset", help="llama-3.1-8b or llama-3.1-70b; see "
+                                "`serving-models`")
+    serving_create.add_argument("--model", metavar="HF_ID",
+                                help="a Hugging Face id, e.g. Qwen/Qwen3-8B; its config.json "
+                                "is read on the server")
+    serving_create.add_argument("--revision", help="a branch, tag or commit of --model")
+    serving_create.add_argument("--config-url", metavar="URL",
+                                help="an https URL to the model's config.json")
+    serving_create.add_argument(
+        "--hourly-budget", type=float, metavar="USD",
+        help="REQUIRED: the most the plan may cost, US dollars PER HOUR for all its machines")
+    serving_create.add_argument("--avg-input-tokens", type=int, metavar="N",
+                                help="average prompt length of the traffic (default 763)")
+    serving_create.add_argument("--avg-output-tokens", type=int, metavar="N",
+                                help="average answer length of the traffic (default 232)")
+    serving_create.add_argument("--max-spend", type=float, metavar="USD",
+                                help="stop the serving after this many dollars in total")
+    serving_create.add_argument("--image", help="the vLLM image; default is the operator's")
+    serving_create.add_argument(
+        "--hf-token-secret", metavar="NAME",
+        help="the NAME of a registered Hugging Face token (e.g. HF_TOKEN), for a gated model")
+    add_json_flag(serving_create)
+
+    servings_list = sub.add_parser("servings", help="your servings, and whether each is up")
+    add_json_flag(servings_list)
+
+    serving_status = sub.add_parser(
+        "serving-status", help="one serving: phase, plans, the chosen machines, the endpoint")
+    serving_status.add_argument("name")
+    add_json_flag(serving_status)
+
+    serving_delete = sub.add_parser(
+        "serving-delete", help="delete a serving; its machines are given back and billing stops",
+        description="Deletes the HyperunServing. The operator gives back every machine it "
+        "rented, and the endpoint stops answering. The API key goes with it.",
+    )
+    serving_delete.add_argument("name")
+    serving_delete.add_argument("--yes", "-y", action="store_true",
+                                help="skip the confirmation. For scripts.")
+
+    serving_key = sub.add_parser(
+        "serving-key", help="print a serving's endpoint URL and API key",
+        description="Reads the serving's API key, which an OpenAI client sends as "
+        "`Authorization: Bearer`. It is printed, so treat the terminal like a password field.",
+    )
+    serving_key.add_argument("name")
+    add_json_flag(serving_key)
+
     return parser
 
 
@@ -592,6 +706,18 @@ def build_submit_body(args: argparse.Namespace) -> dict[str, Any]:
     # widen what the file allowed.
     if getattr(args, "region", None):
         body["regions"] = list(dict.fromkeys(args.region))
+    # HYPERUN-SERVING-PLAN. A flag overrides the same field of a file's `serving_plan`, and the
+    # rest of the file's block is kept, the way --gpu-count overrides one field of `gpu`.
+    serving = dict(body.get("serving_plan") or {})
+    for flag, field in (
+        ("serving_model", "model"), ("avg_input_tokens", "avg_input_tokens"),
+        ("avg_output_tokens", "avg_output_tokens"), ("hourly_budget", "hourly_budget"),
+    ):
+        value = getattr(args, flag, None)
+        if value is not None:
+            serving[field] = value
+    if serving:
+        body["serving_plan"] = serving
 
     # A GPU is asked for in exactly one of two styles, by memory or by model.
     # TWO CASES THAT LOOK ALIKE AND ARE NOT:
@@ -664,7 +790,10 @@ def build_submit_body(args: argparse.Namespace) -> dict[str, Any]:
 # of them leaves, the server's own schema is asked whether it knows the field. That
 # is one unauthenticated GET, made only when such a field is in the body -- which
 # also covers a body read from -f.
-FIELDS_A_SERVER_MUST_KNOW = ("instance_type",)
+#
+# `serving_plan` is on the list for the same reason (HYPERUN-SERVING-PLAN): a server without it
+# drops the block and runs the image as an ordinary job, on whatever its solver picks.
+FIELDS_A_SERVER_MUST_KNOW = ("instance_type", "serving_plan")
 
 
 def require_known_fields(client: Any, body: dict[str, Any]) -> None:
@@ -680,10 +809,13 @@ def require_known_fields(client: Any, body: dict[str, Any]) -> None:
     known = (client.schema() or {}).get("properties") or {}
     missing = [name for name in used if name not in known]
     if missing:
+        flags = {"instance_type": "--instance-type",
+                 "serving_plan": "the serving plan (--serving-model and the three after it)"}
         raise SystemExit(
             f"this server does not know {', '.join(missing)}. It would drop the field "
             f"and still run the job, on whatever machine its solver picks. Ask whoever "
-            f"runs the server to upgrade it, or leave --instance-type out."
+            f"runs the server to upgrade it, or leave "
+            f"{' and '.join(flags[name] for name in missing)} out."
         )
 
 
@@ -1161,6 +1293,28 @@ def cmd_status(args: argparse.Namespace) -> int:
     # the one they chose. An older server sends no note, and nothing is printed.
     if view.get("placement_note"):
         print(f"  placement  {view['placement_note']}")
+    # HYPERUN-SERVING-PLAN. The plan the operator rented, then one line on the ranked list.
+    # The list itself is up to 50 plans of nested pipelines, which `--json` prints whole; an
+    # older server sends neither field and nothing is printed.
+    chosen = view.get("serving_plan_chosen")
+    if chosen:
+        score = f", score {chosen['score']}" if chosen.get("score") else ""
+        print(f"  serving    plan {chosen.get('rank')}: {chosen.get('instance_type')} "
+              f"({chosen.get('cloud')} / {chosen.get('region')}), "
+              f"${chosen.get('cost_per_hour')}/h, estimated {chosen.get('throughput_rps')} "
+              f"req/s{score}, attempt {chosen.get('attempt')}")
+    plans = view.get("serving_plans") or []
+    if plans:
+        # ★ RANK 1 IS THE BEST SCORE, NOT THE CHEAPEST. PACSrun ranks by requests per second
+        # per dollar-hour since 2026-10-19, and in its own snapshot that day the $10.80/h plan
+        # outranked the $8.07/h one. This line said "the cheapest is" until 2026-10-20.
+        best = plans[0]
+        score = f" (score {best['score']} req/s per $/h)" if best.get("score") else ""
+        print(f"  plans      {len(plans)} ranked; rank 1 is ${best.get('cost_per_hour')}"
+              f"/h for {best.get('throughput_rps')} req/s on {best.get('nodes')} "
+              f"machine(s){score}. --json lists them all")
+    if view.get("serving_catalog"):
+        print(f"  catalog    {view['serving_catalog']}")
     if view.get("recovery_count"):
         # Not a failure: the job was restarted. It used to say "the machine was
         # reclaimed" every time, which was wrong for job-a9ea30b8ba7a -- its three
@@ -1575,6 +1729,180 @@ def cmd_logs(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+# ------------------------------------------------------------------ HYPERUN-SERVING
+#
+# The serving commands. Each is one request; the server owns every judgement (which model is
+# allowed, whether a budget is valid, which plan is rented), so nothing here checks a value.
+
+
+def cmd_serving_models(args: argparse.Namespace) -> int:
+    """Print the presets, the supported families and the recommendation."""
+    answer = client_from_config().serving_models()
+    print("presets (the planner carries their numbers):")
+    for preset in answer.get("presets") or []:
+        gated = ", gated: needs a Hugging Face token" if preset.get("gated") else ""
+        print(f"  {preset['preset']:<15} {preset['name']}{gated}")
+    print("\ndense families known to plan correctly (give the id with --model):")
+    for family in answer.get("families") or []:
+        print(f"  {family['family']:<15} {family['architecture']:<20} e.g. {family['example']}")
+    print(f"\nrecommended: {answer.get('recommendation', '')}")
+    print(f"refused: {answer.get('refused', '')}")
+    return EXIT_OK
+
+
+def _model_ask(value: str) -> dict[str, Any]:
+    """An id or a URL, as the server's two fields."""
+    return {"config_url": value} if value.startswith(("https://", "http://")) else {"model": value}
+
+
+def cmd_model_config(args: argparse.Namespace) -> int:
+    """Print a model's config numbers, or the server's refusal (exit 1)."""
+    body = _model_ask(args.model)
+    if args.revision:
+        body["revision"] = args.revision
+    if args.hf_token_secret:
+        body["hf_token_secret"] = args.hf_token_secret
+    answer = client_from_config().model_config(body)
+    if args.json:
+        print(json.dumps(answer, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    print(f"{answer.get('name') or answer.get('config_source')}  ({answer.get('family')})")
+    for key, value in (answer.get("config") or {}).items():
+        print(f"  {key:<20} {value}")
+    for note in answer.get("notes") or []:
+        print(f"  note: {note}")
+    print(f"\nread from {answer.get('config_source')}")
+    return EXIT_OK
+
+
+def build_serving_body(args: argparse.Namespace) -> dict[str, Any]:
+    """The POST /v1/servings body from -f and the flags; a flag wins over the file's field."""
+    body: dict[str, Any] = load_job_file(args.file) if args.file else {}
+    if args.name:
+        body["name"] = args.name
+    model = dict(body.get("model") or {})
+    for flag, field in (("preset", "preset"), ("model", "name"), ("revision", "revision"),
+                        ("config_url", "config_url")):
+        value = getattr(args, flag, None)
+        if value is not None:
+            model[field] = value
+    if model:
+        body["model"] = model
+    for flag, field in (("hourly_budget", "hourly_budget"), ("avg_input_tokens",
+                        "avg_input_tokens"), ("avg_output_tokens", "avg_output_tokens"),
+                        ("max_spend", "max_spend_usd"), ("image", "image"),
+                        ("hf_token_secret", "hf_token_secret")):
+        value = getattr(args, flag, None)
+        if value is not None:
+            body[field] = value
+    if not body.get("name"):
+        raise SystemExit("a serving needs a name: `hyperun serving-create <name> ...`")
+    return body
+
+
+def _serving_url(client: Any, view: dict[str, Any]) -> str:
+    """The OpenAI base_url: the server this CLI talks to, then the serving's endpoint path."""
+    return client.server + ((view.get("endpoint") or {}).get("path") or "")
+
+
+def cmd_serving_create(args: argparse.Namespace) -> int:
+    """Create a serving and say what it will cost and where it will answer."""
+    client = client_from_config()
+    view = client.create_serving(build_serving_body(args))
+    if args.json:
+        print(json.dumps(view, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    print(f"created serving {view['name']}")
+    print(f"  endpoint   {_serving_url(client, view)}  (answers once ready; "
+          f"`hyperun serving-status {view['name']}`)")
+    if view.get("billing"):
+        print(f"  billing    {view['billing']}")
+    print(f"  stop it    hyperun serving-delete {view['name']}")
+    return EXIT_OK
+
+
+def cmd_servings(args: argparse.Namespace) -> int:
+    """List this caller's servings."""
+    answer = client_from_config().servings()
+    if args.json:
+        print(json.dumps(answer, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    rows = answer.get("servings") or []
+    if not rows:
+        print("no servings. `hyperun serving-create` starts one.")
+        return EXIT_OK
+    for view in rows:
+        chosen = view.get("serving_plan_chosen") or {}
+        rate = f"${chosen['cost_per_hour']}/h" if chosen.get("cost_per_hour") else "-"
+        ready = "ready" if (view.get("endpoint") or {}).get("ready") else "not ready"
+        model = (view.get("model") or {}).get("name", "")
+        print(f"{view['name']:<24} {view.get('phase') or 'accepted':<12} {ready:<10} "
+              f"{rate:<12} {model}")
+    return EXIT_OK
+
+
+def cmd_serving_status(args: argparse.Namespace) -> int:
+    """Print one serving's state, the plan it rents and where it answers."""
+    client = client_from_config()
+    view = client.serving(args.name)
+    if args.json:
+        print(json.dumps(view, indent=2, ensure_ascii=False))
+        return EXIT_OK
+    model = view.get("model") or {}
+    endpoint = view.get("endpoint") or {}
+    print(f"{view['name']}  {model.get('name', '')}")
+    print(f"  phase      {view.get('phase') or 'accepted, not yet started'}")
+    print(f"  endpoint   {_serving_url(client, view)}  "
+          f"({'ready' if endpoint.get('ready') else 'not ready yet'})")
+    chosen = view.get("serving_plan_chosen")
+    if chosen:
+        score = f", score {chosen['score']}" if chosen.get("score") else ""
+        print(f"  plan       rank {chosen.get('rank')}: ${chosen.get('cost_per_hour')}/h, "
+              f"estimated {chosen.get('throughput_rps')} req/s{score}, attempt "
+              f"{chosen.get('attempt')}")
+        for stage in chosen.get("stages") or []:
+            print(f"    machine  {stage.get('instance_type')} ({stage.get('cloud')} / "
+                  f"{stage.get('region')}), {stage.get('layers')} layers, TP {stage.get('tp')}")
+    plans = view.get("serving_plans") or []
+    if plans:
+        best = plans[0]
+        print(f"  plans      {len(plans)} ranked by score; rank 1 is ${best.get('cost_per_hour')}"
+              f"/h for {best.get('throughput_rps')} req/s. --json lists them all")
+    if view.get("serving_catalog"):
+        print(f"  catalog    {view['serving_catalog']}")
+    if view.get("billing"):
+        print(f"  billing    {view['billing']}")
+    if view.get("message"):
+        print(f"  message    {view['message']}")
+    return EXIT_OK
+
+
+def cmd_serving_delete(args: argparse.Namespace) -> int:
+    """Delete a serving, asking first unless --yes."""
+    if not args.yes:
+        answer = input(f"delete serving {args.name}? its machines are given back, its endpoint "
+                       f"and API key stop working [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("left alone")
+            return EXIT_USAGE
+    client_from_config().delete_serving(args.name)
+    print(f"deleted serving {args.name}")
+    return EXIT_OK
+
+
+def cmd_serving_key(args: argparse.Namespace) -> int:
+    """Print the endpoint and its API key, in the two names OpenAI's SDKs read."""
+    client = client_from_config()
+    answer = client.serving_key(args.name)
+    base_url = client.server + answer.get("endpoint_path", "")
+    if args.json:
+        print(json.dumps({**answer, "base_url": base_url}, indent=2))
+        return EXIT_OK
+    print(f"OPENAI_BASE_URL={base_url}")
+    print(f"OPENAI_API_KEY={answer['api_key']}")
+    return EXIT_OK
+
+
 COMMANDS = {
     "login": cmd_login,
     "delete": cmd_delete,
@@ -1596,6 +1924,13 @@ COMMANDS = {
     "watch": cmd_watch,
     "stats": cmd_stats,
     "logs": cmd_logs,
+    "serving-models": cmd_serving_models,
+    "model-config": cmd_model_config,
+    "serving-create": cmd_serving_create,
+    "servings": cmd_servings,
+    "serving-status": cmd_serving_status,
+    "serving-delete": cmd_serving_delete,
+    "serving-key": cmd_serving_key,
 }
 
 

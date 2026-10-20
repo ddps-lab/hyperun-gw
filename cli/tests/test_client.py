@@ -169,3 +169,38 @@ def test_shell_can_ask_for_the_persistent_session_and_carries_its_sequence():
     assert session.calls[0]["json"]["session"] is True
     assert session.calls[0]["json"]["seq"] == 7
     assert result["seq"] == 42, "the reply carries the next one back"
+
+
+# ------------------------------------------------------------ HYPERUN-SERVING
+
+
+@pytest.mark.parametrize("call, method, path, authenticated", [
+    (lambda c: c.serving_models(), "GET", "/v1/serving-models", False),
+    (lambda c: c.model_config({"model": "Qwen/Qwen3-8B"}), "POST", "/v1/model-config", True),
+    (lambda c: c.create_serving({"name": "chat"}), "POST", "/v1/servings", True),
+    (lambda c: c.servings(), "GET", "/v1/servings", True),
+    (lambda c: c.serving("chat"), "GET", "/v1/servings/chat", True),
+    (lambda c: c.serving_key("chat"), "GET", "/v1/servings/chat/api-key", True),
+])
+def test_each_serving_call_reaches_its_route(call, method, path, authenticated):
+    """The guidance route is the one read without a token, like explain and schema."""
+    session = FakeSession(FakeResponse(200, {}))
+    call(client_with(session))
+    sent = session.calls[0]
+    assert (sent["method"], sent["url"]) == (method, "https://run.example" + path)
+    assert ("Authorization" in sent["headers"]) is authenticated
+
+
+def test_a_serving_name_is_quoted_into_the_path_and_the_server_is_readable():
+    session = FakeSession(FakeResponse(204))
+    client = client_with(session)
+    client.delete_serving("a/b")
+    assert session.calls[0]["url"] == "https://run.example/v1/servings/a%2Fb"
+    assert client.server == "https://run.example"
+
+
+def test_a_model_config_refusal_carries_the_servers_sentence():
+    session = FakeSession(FakeResponse(422, {"detail": "[model-config-moe] this is a "
+                                                       "mixture-of-experts model"}))
+    with pytest.raises(ServerError, match=r"\[model-config-moe\]"):
+        client_with(session).model_config({"model": "Qwen/Qwen3-30B-A3B"})

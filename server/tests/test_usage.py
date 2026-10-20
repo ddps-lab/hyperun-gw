@@ -29,7 +29,7 @@ def when(text: str) -> datetime.datetime:
 NOW = when("2026-09-16T00:00:00")
 
 
-def job(name, started, finished=None, owner="jglee", vendor="runpod",
+def job(name, started, finished=None, owner="alice", vendor="runpod",
         usd_per_hour=6.36, gpus=4):
     """A HyperunJob shaped the way the cluster actually returns one."""
     status = {

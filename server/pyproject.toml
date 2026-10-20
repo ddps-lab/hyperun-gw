@@ -38,6 +38,12 @@ dependencies = [
     # which is what actually does RS256; measured 3.8 MB, against a package that
     # unzips to 106.5 MB of a 250 MB limit.
     "pyjwt[crypto]>=2.8",
+    # HYPERUN-SERVING-PROXY and HYPERUN-MODEL-CONFIG. An HTTP client that can stream: the serving
+    # endpoint relays vLLM's SSE chunk by chunk from inside the event loop (an async client, so
+    # a long answer holds no worker thread), and the model-config lookup follows the Hub's
+    # redirect with each hop checked. It was already here as a test dependency (TestClient runs
+    # on it), so this adds no new package to the tree, only to the image.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]

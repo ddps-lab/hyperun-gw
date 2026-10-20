@@ -28,10 +28,12 @@ Authorization: Bearer <your token>
 | POST | `/v1/jobs/{job_id}/exec` | Run one command inside a running job's workload container. |
 | GET | `/v1/jobs/{job_id}/logs` | One window of a job's output. Ask again for more. |
 | GET | `/v1/jobs/{job_id}/metrics` | GPU usage and training progress, read out of the job's own log. |
+| GET | `/v1/jobs/{job_id}/serving-check` | What a serving check measured, next to what the planner estimated. |
 | GET | `/v1/jobs/{job_id}/spec` | The submission this job was created from, with secrets removed. |
 | POST | `/v1/jobs/{job_id}/stop` | Pause a running job, keeping its machine — or let it run again. |
 | GET | `/v1/login-config` | Where to send someone to sign in. |
 | GET | `/v1/metrics/query` | Ask the in-cluster Prometheus one instant query. |
+| POST | `/v1/model-config` | Read a model's config.json and return the numbers a serving's spec.model.config takes. |
 | GET | `/v1/namespaces` | Which namespaces this caller may read — the screen's namespace picker. |
 | GET | `/v1/prices` | What every GPU the catalogue knows costs, in every region it prices. |
 | POST | `/v1/register-request` | Ask an operator to give this signed-in address a namespace. |
@@ -40,6 +42,14 @@ Authorization: Bearer <your token>
 | GET | `/v1/secrets` | Which names a job may put in `secrets` — the names only. |
 | DELETE | `/v1/secrets/{name}` | Forget one registered name in your namespace. |
 | PUT | `/v1/secrets/{name}` | Register one value under one name, for jobs in your own namespace. |
+| GET | `/v1/serving-models` | Which models a serving can be planned for. HYPERUN-MODEL-CONFIG. |
+| GET | `/v1/servings` | This caller's servings, newest first (HYPERUN-OWNER-GATE filters namespace-mates'). |
+| POST | `/v1/servings` | Serve a model behind an OpenAI-compatible endpoint. HYPERUN-SERVING. |
+| DELETE | `/v1/servings/{name}` | Delete a serving. The operator watches for it and gives back every machine it rented; |
+| GET | `/v1/servings/{name}` | One serving: phase, ranked plans, the chosen plan's machines, the endpoint path. |
+| GET | `/v1/servings/{name}/api-key` | The endpoint's API key, read from the Secret the operator created. HYPERUN-SERVING-KEY. |
+| GET | `/v1/servings/{ns}/{name}/v1/{path}` | The serving's OpenAI-compatible endpoint. HYPERUN-SERVING-PROXY. |
+| POST | `/v1/servings/{ns}/{name}/v1/{path}` | The serving's OpenAI-compatible endpoint. HYPERUN-SERVING-PROXY. |
 | GET | `/v1/stats` | What this caller's team has spent. |
 | GET | `/v1/usage` | Who spent what, day by day, across every namespace. Operators only. |
 | POST | `/v1/validate` | Check a job without running it. |
@@ -303,6 +313,9 @@ What `GET /v1/jobs/{id}` returns.
 | `placement_note` |  | One sentence: where the job was asked to go, where it runs, and -- when those differ -- that it did not land on the first vendor asked. Written to be passed to the user as it is. |
 | `recovery_count` |  | How many times the job was restarted: after losing a machine, or after an offering failed to start and was skipped. `failed_offerings` counts the offerings skipped either way. |
 | `result_path` |  | Where the output is. This is the one place a namespace name crosses the API boundary, because it is part of the S3 key. The screen now downloads through /v1/jobs/{id}/artifacts instead, but this field stays: the CLI and scripts read results with `aws s3 sync <this>`. |
+| `serving_catalog` |  | HYPERUN-SERVING-PLAN. Which Shadeform catalog `serving_plans` was ranked on and when it was fetched, in the operator's words, e.g. "Shadeform catalog fetched 2026-10-20T02:39:32Z (live ConfigMap hyperun-shadeform-catalog)". The cluster refreshes it every 10 minutes, so two jobs with the same ask can get different lists and stock is the reason. Empty from an operator that does not write it. |
+| `serving_plan_chosen` |  | HYPERUN-SERVING-PLAN. The plan this job rents, or last tried to rent, from status.servingPlanChosen, with how many plans it has chosen so far. Null in compare mode, which rents nothing, and before a plan is chosen. |
+| `serving_plans` |  | HYPERUN-SERVING-PLAN. The planner's ranked rental plans for a job that sent `serving_plan`, highest score (requests per second per dollar-hour) first, every one within the hourly budget, up to 50, from status.servingPlans. Empty until the planner has answered and for every other job. Left OUT of GET /v1/jobs, whose rows are polled every 15 s: read GET /v1/jobs/{id}. |
 | `started_at` |  | When the job's pod first ran, from status.startedAt (HYPERUN-JOB-CLOCK). Absent while the job is still waiting for a machine, which is exactly what makes queue time visible: started_at - created_at is the wait, finished_at - started_at is the run. |
 | `stopped` |  | Whether a pause has been ASKED FOR, from spec.stopped. ★ It is the request and not the outcome: the machine pauses seconds to a minute later, and on some vendors it cannot pause at all -- Shadeform has no stop API, a spot instance has no stopped state, a RunPod pod with no volume would lose everything. `phase == 'Stopped'` is the statement that it actually happened. A screen that read this one as 'paused' would tell somebody a $6/hour machine had stopped billing when it had not. |
 | `stopped_at` |  | When the machine was actually paused, from status.stoppedAt. The orphan sweep measures the 7-day protection from it: a job left paused longer than that stops being protected and its machine is swept. |
@@ -333,6 +346,7 @@ A submit request plus the facts needed to judge it.
 | `regions` |  | Which regions may answer, as PACSrun's placement.regions spells them: a bare vendor ('gcp'), or a vendor and region ('aws/us-east-1'). EMPTY IS NOT 'anywhere' FOR AWS -- it is the operator's one default region, us-west-2 in this deployment (PACSrun's placement.go:376, grep HYPERUN-AWS-ONE-REGION). So a job that wants a cheaper region has to name it. GET /v1/prices lists every region the catalogue prices. |
 | `script` |  | The text of your run.sh. Four validate checks are skipped without it. IT IS ALSO WHAT RUNS when you send no `command` and no `args`: the job then gets args ['bash','-lc',<this text>], which is the same shape the screen sends and the shape GET /v1/scripts reads back. An explicit `command` or `args` wins, for the case where the script is fetched inside the container instead. Never stored anywhere -- it lives on the job, so deleting the job deletes it. |
 | `secrets` |  | ENVIRONMENT VARIABLE names to inject — the names your script reads, e.g. ["GITHUB_PAT"]. NOT the name of a Kubernetes Secret: the server maps each one to a Secret and key itself. The value never travels through this API, and neither does that internal name. Ask `hyperun secrets` for the list this deployment accepts; a name that is not on it is refused. |
+| `serving_plan` |  | Ask the ShuntServe planner which Shadeform machines serve a model with the most requests per second per dollar-hour within hourly_budget, instead of naming a GPU. There is no target request rate. The job then goes out on-demand with regions [shadeform]; leave capacity_type, vendors, regions, gpu and instance_type out. With placement_mode 'compare' the plans are ranked and nothing is rented; with any other mode the highest-score plan that runs on one machine is rented, this image runs there, and parallelism must be 1. The ranked plans come back as `serving_plans` on the job, with the catalog they were ranked on as `serving_catalog`. HYPERUN-SERVING-PLAN. |
 | `training` |  |  |
 | `vendors` |  | WHO the machines may be bought from, in the order they are asked. Empty, with no regions either, sends the job with every runnable vendor (shadeform, runpod, aws) and placement_mode 'cheapest', so it buys the cheapest answer (spot jobs excepted: they go to AWS alone, the only one selling spot). Runnable: aws, runpod, shadeform. Price-only: gcp, azure, lambda, nebius -- these are answered from catalogue CSVs and no actuator here can rent from them, so list one only together with placement_mode 'compare', which stops after the ranking. |
 
@@ -407,6 +421,47 @@ What /v1/jobs/{id}/metrics returns.
 | `progress` |  |  |
 | `sample_count` |  | How many readings the lowest-indexed card printed in the window. `len(gpu_series)` is not that number -- the series is thinned to at most 400 points for drawing -- and the screen printed the thinned one as 'N samples'. |
 | `window_seconds` | yes | How far back the log was read. Older readings are still in the log; ask for a bigger window to see them. |
+
+### ModelConfigBody
+
+The contract's `spec.model.config`, in this API's snake_case.
+
+| field | required | description |
+|---|---|---|
+| `architecture` | yes | config.json's architectures[0], e.g. LlamaForCausalLM. One of the dense families GET /v1/serving-models lists. |
+| `dtype` |  | config.json's torch_dtype, e.g. bfloat16. |
+| `head_dim` | yes |  |
+| `hidden_size` | yes |  |
+| `intermediate_size` | yes |  |
+| `num_attention_heads` | yes |  |
+| `num_key_value_heads` | yes |  |
+| `num_layers` | yes | config.json's num_hidden_layers. |
+| `vocab_size` | yes |  |
+
+### ModelConfigRequest
+
+The body of `POST /v1/model-config`.
+
+| field | required | description |
+|---|---|---|
+| `config_url` |  | A URL to a config.json, instead of `model`. https only, public addresses only. |
+| `hf_token_secret` |  | The NAME of a registered value holding a Hugging Face token (e.g. HF_TOKEN), for a gated repository. Sent to huggingface.co only. |
+| `model` |  | A Hugging Face repository id, e.g. Qwen/Qwen3-8B. |
+| `revision` |  | A branch, tag or commit. |
+
+### ModelConfigResponse
+
+What `POST /v1/model-config` returns: the model's structure, or a 422 saying why not.
+
+| field | required | description |
+|---|---|---|
+| `config` | yes | snake_case; pass it as model.config to POST /v1/servings. |
+| `config_source` | yes | The URL that was read. |
+| `family` | yes | Which supported dense family it belongs to. |
+| `name` | yes | The HF id, "" for a URL that is not huggingface.co. |
+| `notes` |  | What was derived rather than read, and what the planner may get wrong for this model. |
+| `revision` |  |  |
+| `spec_config` | yes | The same numbers in the camelCase shape HyperunServing's spec.model.config takes, for an agent writing the object itself. |
 
 ### MonitorFindingView
 
@@ -542,6 +597,191 @@ What `GET /v1/secrets` returns: the accepted words, and nothing else.
 | `names` |  | Every word a job may put in `secrets`, e.g. ["GITHUB_PAT"] — the operator's bindings and your namespace's own registrations together, because what a submitter needs is the list that works. |
 | `note` |  | Why the list is empty when it is, and what to do about it. |
 | `own` |  | Which of `names` your namespace registered itself, through `hyperun secret-set`. You can replace or remove these; the rest belong to the deployment and only an operator changes them. |
+
+### ServingCheckResponse
+
+What `GET /v1/jobs/{id}/serving-check` returns. HYPERUN-SERVING-CHECK-ROUTE.
+
+| field | required | description |
+|---|---|---|
+| `check` |  | The file's JSON as written, when found. A value the job could not measure is null in it, never 0. |
+| `found` | yes | True when the file exists and carries the schema. |
+| `name` |  | The file read, relative to the result path. |
+| `note` |  | Why nothing was found, when it was not. |
+
+### ServingChosenView
+
+status.servingPlanChosen of a serving: the plan it rents, with every machine of it.
+
+| field | required | description |
+|---|---|---|
+| `attempt` |  | How many plans this serving has chosen, this one included. |
+| `cost_per_hour` |  | US dollars per hour, every machine together. |
+| `latency_seconds` |  | The planner's estimate. |
+| `rank` | yes | Its rank in `serving_plans`. |
+| `score` |  | Requests per second per dollar-hour, why it was chosen over the later ranks. |
+| `stages` |  |  |
+| `throughput_rps` |  | The planner's estimate. |
+
+### ServingEndpointView
+
+Where to send OpenAI requests, and whether anything answers there yet.
+
+| field | required | description |
+|---|---|---|
+| `path` | yes | Append to the gateway's address: <server><path> is the OpenAI base_url. Authenticate with the serving's API key as `Authorization: Bearer`, read once from GET /v1/servings/{name}/api-key. |
+| `ready` |  | True when the operator says vLLM answers. Until then the path answers 503. |
+
+### ServingKeyResponse
+
+What `GET /v1/servings/{name}/api-key` returns. Shown once; never cached.
+
+| field | required | description |
+|---|---|---|
+| `api_key` | yes | Send as `Authorization: Bearer <api_key>` to the endpoint path. Treat it like a password. |
+| `endpoint_path` | yes |  |
+
+### ServingListResponse
+
+What `GET /v1/servings` returns.
+
+| field | required | description |
+|---|---|---|
+| `servings` | yes |  |
+| `total` | yes |  |
+
+### ServingModelRequest
+
+Which model. One of: `preset`; `name` (an HF id); `config_url`; or `name` with `config`.
+
+| field | required | description |
+|---|---|---|
+| `config` |  | The model's structure, filled by the caller (e.g. from POST /v1/model-config, or by reading config.json yourself). Needs `name`. |
+| `config_url` |  | A URL to a config.json, instead of reading it by `name`. A huggingface.co URL also gives the id and the revision; any other URL needs `name` as well, because vLLM loads weights by id. |
+| `name` |  | The Hugging Face repository id vLLM loads, e.g. Qwen/Qwen3-8B. Without `config`, the server reads its config.json (POST /v1/model-config shows what it would find). |
+| `preset` |  | A preset the planner carries: llama-3.1-8b, llama-3.1-70b. Fills the HF id and the config itself. |
+| `revision` |  | A branch, tag or commit of `name`. |
+
+### ServingPipelineView
+
+One copy of the model, its layers split in order across its stages' machines.
+
+| field | required | description |
+|---|---|---|
+| `cost_per_hour` |  | US dollars per hour. |
+| `domain` | yes | `<provider>/<region>`, e.g. `hyperstack/montreal-canada-2`. Every stage of one pipeline is in it. |
+| `stages` |  |  |
+| `throughput_rps` |  | Estimated requests/second. |
+| `vendor` |  | Who sells the pipeline's machines: `shadeform`, or `aws` for a plan priced from ShuntServe's AWS on-demand table, which is listed and never rented. Empty from an operator that does not write it. |
+
+### ServingPlanChosenView
+
+status.servingPlanChosen: the plan the job rents, or last tried to rent. Absent in
+compare mode. The wording below is PACSrun's CRD's (HYPERUN-SHUNTSERVE-EXECUTE).
+
+| field | required | description |
+|---|---|---|
+| `attempt` |  | How many plans this job has chosen, this one included: 1 first, one more on each failover to a different plan. |
+| `cloud` |  | The provider behind Shadeform, e.g. `hyperstack`. |
+| `cost_per_hour` |  | The plan's estimate, US dollars per hour. |
+| `instance_type` |  | The Shadeform instance type exactly as the driver pod is told to rent it, e.g. `A100_80G`; the provider and region are `cloud` and `region`. |
+| `latency_seconds` |  | The plan's estimate. |
+| `rank` | yes | Its rank in `serving_plans`. |
+| `region` |  | The Shadeform region. |
+| `score` |  | The plan's score, why it was chosen over the later ones: requests per second per dollar-hour. |
+| `throughput_rps` |  | The plan's estimate. |
+
+### ServingPlanRequest
+
+HYPERUN-SERVING-PLAN. Ask the ShuntServe planner how to serve a model, instead of
+asking for a GPU.
+
+| field | required | description |
+|---|---|---|
+| `avg_input_tokens` |  | Average prompt length of the traffic, in tokens. ShuntServe's own workload is 763. |
+| `avg_output_tokens` |  | Average answer length of the traffic, in tokens. ShuntServe's own workload is 232. |
+| `hourly_budget` |  | The most a plan may cost, in US dollars PER HOUR for all of its machines together, e.g. 20.0. It is an hourly rate: there is no total budget and no duration. |
+| `model` |  | Which model to serve, as a preset name: llama-3.1-8b or llama-3.1-70b. The planner reads the layer count and sizes from the preset. |
+
+### ServingPlanView
+
+One rental plan from status.servingPlans.
+
+| field | required | description |
+|---|---|---|
+| `cost_per_hour` |  | The whole plan, every machine together, in US dollars per hour. |
+| `executable` |  | True when one machine runs the whole plan (one pipeline of one stage), the only kind of plan a job can rent. Null from an operator that does not write it. |
+| `latency_seconds` |  | The planner's estimate of one request's latency on the plan's slowest pipeline, in seconds. Null from an operator that does not write it. |
+| `nodes` |  | How many machines the plan rents. |
+| `pipelines` |  |  |
+| `price_basis` |  | What the prices are for; `on_demand`. |
+| `rank` | yes | 1 is the highest score: the most estimated requests per second per dollar-hour, every plan within the hourly budget. A tie goes to the cheaper plan. Rank 1 is NOT the cheapest plan. |
+| `score` |  | ShuntServe's score, the number the ranks are sorted by: throughput_rps / cost_per_hour, requests per second per dollar-hour, as the planner computed it. Null from an operator that does not write it. |
+| `throughput_rps` |  | The planner's estimate, requests per second: the sum of its pipelines'. |
+
+### ServingRequest
+
+The body of `POST /v1/servings`.
+
+| field | required | description |
+|---|---|---|
+| `avg_input_tokens` |  | Average prompt length of the traffic, in tokens. Default 763, ShuntServe's own workload. |
+| `avg_output_tokens` |  | Average answer length of the traffic, in tokens. Default 232. |
+| `hf_token_secret` |  | The NAME of a value you registered with `hyperun secret-set` (e.g. HF_TOKEN) holding a Hugging Face token, for a gated model. The value never travels through this API: the server reads config.json with it, and the operator hands it to vLLM to download the weights. |
+| `hourly_budget` |  | REQUIRED. The most the served plan may cost, US dollars PER HOUR for all its machines together, e.g. 3.00. The planner ranks plans by requests per second per dollar-hour among those within it. The serving bills by the hour until it is deleted. |
+| `image` |  | The vLLM image. Leave it out for the operator's default. |
+| `max_spend_usd` |  | Optional. Total US dollars after which the operator stops the serving. |
+| `model` | yes |  |
+| `name` | yes | The serving's name: lowercase letters, digits and '-', starting with a letter, at most 40 characters. It is part of the endpoint URL /v1/servings/<namespace>/<name>/v1, so it must be unique in your namespace. |
+
+### ServingStageChosenView
+
+One machine of the chosen plan: where it is rented and which layers it runs.
+
+| field | required | description |
+|---|---|---|
+| `cloud` |  | The provider behind Shadeform, e.g. hyperstack. |
+| `instance_type` |  | The Shadeform instance type, e.g. A100_80G. |
+| `layers` |  | How many consecutive model layers it holds. |
+| `region` |  | The Shadeform region. |
+| `tp` |  | Tensor-parallel size: the machine's GPU count. |
+
+### ServingStageView
+
+One machine of a pipeline, and the layers it runs.
+
+| field | required | description |
+|---|---|---|
+| `instance_type` | yes | `<cloud>_<shade_instance_type>`, e.g. `hyperstack_A100_80G`: the Shadeform machine. |
+| `layers` | yes | How many consecutive model layers this machine holds. |
+| `price_per_hour` |  | US dollars per hour. |
+| `tp` | yes | Tensor-parallel size, which is the machine's GPU count. |
+| `zone` |  | The Shadeform region it is sold in. |
+
+### ServingView
+
+What `GET /v1/servings/{name}` returns.
+
+| field | required | description |
+|---|---|---|
+| `avg_input_tokens` |  |  |
+| `avg_output_tokens` |  |  |
+| `billing` |  | What this serving costs while it exists, in one sentence. |
+| `created_at` |  |  |
+| `endpoint` | yes |  |
+| `hourly_budget` |  | US dollars per hour, as sent. |
+| `image` |  |  |
+| `machines` |  | status.machines as the operator writes it, passed through unchanged. |
+| `max_spend_usd` |  |  |
+| `message` |  |  |
+| `model` |  | name, revision, preset, config_source and config (snake_case), from spec.model. |
+| `name` | yes |  |
+| `namespace` | yes | Part of the endpoint path, which is why it crosses the API here. |
+| `phase` |  | The operator's phase word, verbatim. Empty until it has looked at the serving once. |
+| `serving_catalog` |  | Which Shadeform catalog the plans were ranked on, and when it was fetched. |
+| `serving_plan_chosen` |  |  |
+| `serving_plans` |  | The ranked plans, highest score (requests per second per dollar-hour) first, every one within the hourly budget. Left OUT of GET /v1/servings. |
+| `user` |  | Who created it. |
 
 ### StatsResponse
 

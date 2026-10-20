@@ -32,6 +32,13 @@ hyperun <command> [options]
 | `hyperun watch` | GPU usage and training progress |
 | `hyperun stats` | what your team has spent |
 | `hyperun logs` | a job's output |
+| `hyperun serving-models` | which models a serving can use, and which one to start with |
+| `hyperun model-config` | read a model's config.json and print the numbers a serving needs |
+| `hyperun serving-create` | serve a model behind an endpoint; it bills by the hour until you delete it |
+| `hyperun servings` | your servings, and whether each is up |
+| `hyperun serving-status` | one serving: phase, plans, the chosen machines, the endpoint |
+| `hyperun serving-delete` | delete a serving; its machines are given back and billing stops |
+| `hyperun serving-key` | print a serving's endpoint URL and API key |
 
 ## hyperun login
 
@@ -105,6 +112,10 @@ Nothing is submitted. An answer of `unknown` is a real answer: the last time we 
 | `--cpus CPUS` |  | CPU request, e.g. "4" |
 | `--memory MEMORY` |  | memory request, e.g. "16Gi" |
 | `--instance-type TYPE` |  | the exact AWS machine to run on, e.g. t3.xlarge. Leave it out to let the solver choose: a pinned job runs on this type or waits. AWS only, and not with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says whether PACSrun can place it and how many machines the job rents. |
+| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model with the most requests per second per dollar-hour within --hourly-budget, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. There is no target request rate; each plan's rate is its estimate. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the highest-score plan that runs on one machine is rented, and --parallelism must stay 1. |
+| `--avg-input-tokens N` |  | serving plan: average prompt length of the traffic, in tokens |
+| `--avg-output-tokens N` |  | serving plan: average answer length of the traffic, in tokens |
+| `--hourly-budget USD` |  | serving plan: the most a plan may cost, US dollars PER HOUR for all its machines together. An hourly rate; there is no total budget or duration. |
 | `--expected-hours EXPECTED_HOURS` |  | your own guess at the runtime, in hours |
 | `--continue-from JOB_ID` |  | the job id of a previous run of YOURS whose result path this job should reuse, e.g. job-3e1e34cb042c. Use it to continue a multi-iteration run: without it every submit writes to a fresh prefix and the resume step finds nothing. Must be a job of yours in the same namespace; anything else is refused with 404. |
 | `--pairs PAIRS` |  | how many training pairs your dataset holds |
@@ -142,6 +153,10 @@ Nothing is submitted. Pass --script to unlock four more checks.
 | `--cpus CPUS` |  | CPU request, e.g. "4" |
 | `--memory MEMORY` |  | memory request, e.g. "16Gi" |
 | `--instance-type TYPE` |  | the exact AWS machine to run on, e.g. t3.xlarge. Leave it out to let the solver choose: a pinned job runs on this type or waits. AWS only, and not with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says whether PACSrun can place it and how many machines the job rents. |
+| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model with the most requests per second per dollar-hour within --hourly-budget, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. There is no target request rate; each plan's rate is its estimate. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the highest-score plan that runs on one machine is rented, and --parallelism must stay 1. |
+| `--avg-input-tokens N` |  | serving plan: average prompt length of the traffic, in tokens |
+| `--avg-output-tokens N` |  | serving plan: average answer length of the traffic, in tokens |
+| `--hourly-budget USD` |  | serving plan: the most a plan may cost, US dollars PER HOUR for all its machines together. An hourly rate; there is no total budget or duration. |
 | `--expected-hours EXPECTED_HOURS` |  | your own guess at the runtime, in hours |
 | `--continue-from JOB_ID` |  | the job id of a previous run of YOURS whose result path this job should reuse, e.g. job-3e1e34cb042c. Use it to continue a multi-iteration run: without it every submit writes to a fresh prefix and the resume step finds nothing. Must be a job of yours in the same namespace; anything else is refused with 404. |
 | `--pairs PAIRS` |  | how many training pairs your dataset holds |
@@ -179,6 +194,10 @@ Give a YAML or JSON file, or build the request from flags, or both. Flags win ov
 | `--cpus CPUS` |  | CPU request, e.g. "4" |
 | `--memory MEMORY` |  | memory request, e.g. "16Gi" |
 | `--instance-type TYPE` |  | the exact AWS machine to run on, e.g. t3.xlarge. Leave it out to let the solver choose: a pinned job runs on this type or waits. AWS only, and not with --gpu-*: a GPU machine brings its own cards. `hyperun validate` says whether PACSrun can place it and how many machines the job rents. |
+| `--serving-model NAME` |  | ask the ShuntServe planner which Shadeform machines serve this model with the most requests per second per dollar-hour within --hourly-budget, instead of naming a GPU: llama-3.1-8b or llama-3.1-70b. There is no target request rate; each plan's rate is its estimate. The job goes out on-demand on shadeform, so leave --capacity-type, --vendor, --region and --gpu-* out. With --placement-mode compare the plans are only ranked; otherwise the highest-score plan that runs on one machine is rented, and --parallelism must stay 1. |
+| `--avg-input-tokens N` |  | serving plan: average prompt length of the traffic, in tokens |
+| `--avg-output-tokens N` |  | serving plan: average answer length of the traffic, in tokens |
+| `--hourly-budget USD` |  | serving plan: the most a plan may cost, US dollars PER HOUR for all its machines together. An hourly rate; there is no total budget or duration. |
 | `--expected-hours EXPECTED_HOURS` |  | your own guess at the runtime, in hours |
 | `--continue-from JOB_ID` |  | the job id of a previous run of YOURS whose result path this job should reuse, e.g. job-3e1e34cb042c. Use it to continue a multi-iteration run: without it every submit writes to a fresh prefix and the resume step finds nothing. Must be a job of yours in the same namespace; anything else is refused with 404. |
 | `--pairs PAIRS` |  | how many training pairs your dataset holds |
@@ -255,6 +274,72 @@ Aggregate only. Being on a team does not let you read a member's jobs.
 | `job_id` | yes |  |
 | `-f`, `--follow` |  | keep printing as new lines arrive. The server cannot stream, so this asks again every few seconds and prints what is new. |
 | `--interval SECONDS` |  | how often to ask, with --follow (default 6) (default `6.0`) |
+
+## hyperun serving-models
+
+The planner's presets with their numbers, the dense model families known to plan correctly, and a recommendation. Asks the server; nothing is created.
+
+## hyperun model-config
+
+The server reads config.json from Hugging Face (or the URL you give) and answers the model's structure, or says why it cannot be planned: a mixture-of-experts model, an unsupported architecture, a missing number, or a gated repository without a token. Nothing is created.
+
+| argument | required | what it does |
+|---|---|---|
+| `model` | yes | a Hugging Face id (Qwen/Qwen3-8B) or an https URL to a config.json |
+| `--revision REVISION` |  | a branch, tag or commit of the id |
+| `--hf-token-secret NAME` |  | the NAME of a token you registered with `secret-set` (e.g. HF_TOKEN), for a gated repository. The value is read on the server and sent to huggingface.co only. |
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
+
+## hyperun serving-create
+
+Creates a serving. The planner ranks plans by requests per second per dollar-hour within --hourly-budget, the operator rents the best one and starts vLLM, and the endpoint answers once `serving-status` says ready. ★ IT KEEPS BILLING UNTIL `serving-delete` (or --max-spend). Give exactly one of --preset, --model and --config-url, or a file with -f; flags win over the file.
+
+| argument | required | what it does |
+|---|---|---|
+| `name` | yes | lowercase letters, digits and '-', at most 40; part of the endpoint URL |
+| `-f PATH`, `--file PATH` |  | a YAML or JSON body, as POST /v1/servings takes it |
+| `--preset PRESET` |  | llama-3.1-8b or llama-3.1-70b; see `serving-models` |
+| `--model HF_ID` |  | a Hugging Face id, e.g. Qwen/Qwen3-8B; its config.json is read on the server |
+| `--revision REVISION` |  | a branch, tag or commit of --model |
+| `--config-url URL` |  | an https URL to the model's config.json |
+| `--hourly-budget USD` |  | REQUIRED: the most the plan may cost, US dollars PER HOUR for all its machines |
+| `--avg-input-tokens N` |  | average prompt length of the traffic (default 763) |
+| `--avg-output-tokens N` |  | average answer length of the traffic (default 232) |
+| `--max-spend USD` |  | stop the serving after this many dollars in total |
+| `--image IMAGE` |  | the vLLM image; default is the operator's |
+| `--hf-token-secret NAME` |  | the NAME of a registered Hugging Face token (e.g. HF_TOKEN), for a gated model |
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
+
+## hyperun servings
+
+| argument | required | what it does |
+|---|---|---|
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
+
+## hyperun serving-status
+
+| argument | required | what it does |
+|---|---|---|
+| `name` | yes |  |
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
+
+## hyperun serving-delete
+
+Deletes the HyperunServing. The operator gives back every machine it rented, and the endpoint stops answering. The API key goes with it.
+
+| argument | required | what it does |
+|---|---|---|
+| `name` | yes |  |
+| `--yes`, `-y` |  | skip the confirmation. For scripts. |
+
+## hyperun serving-key
+
+Reads the serving's API key, which an OpenAI client sends as `Authorization: Bearer`. It is printed, so treat the terminal like a password field.
+
+| argument | required | what it does |
+|---|---|---|
+| `name` | yes |  |
+| `--json` |  | print raw JSON instead of a human summary. Use this from a script. |
 
 ## Exit codes
 

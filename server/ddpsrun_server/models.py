@@ -9,10 +9,14 @@ END-TO-END FLOW of this file:
      server `Settings` and returns the HyperunJob object to POST to Kubernetes. The
      fields the user did not send are filled in here from identity, never from
      the request — that is the whole point (`docs/03-api.md`, the table titled
-     the "서버가 채우는 것" / what-the-server-fills table).
+     the "서버가 채우는 것" / what-the-server-fills table). A `serving_plan` block
+     becomes spec.placement.servingPlan here, with the on-demand / [shadeform]
+     placement it requires (HYPERUN-SERVING-PLAN).
   3. `JobView.from_hyperunjob()` goes the other way: it takes the object Kubernetes
      returns and produces the response, dropping every internal name on the way
-     out (`docs/03-api.md`, first rule of the response-rules section).
+     out (`docs/03-api.md`, first rule of the response-rules section). The
+     planner's ranked plans and the one rented come back as `serving_plans` and
+     `serving_plan_chosen` (`serving_plans_from`, `serving_plan_chosen_from`).
 
 WHAT THIS STAGE DELIBERATELY DOES NOT DO. `docs/08-plan.md` stage 1 says
 "판단은 아직 없다" — no judgement yet. So nothing here chooses a region, decides
@@ -27,7 +31,9 @@ Grep anchors: HYPERUN-SERVER-FILLS, HYPERUN-NO-INTERNAL-NAMES
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -258,6 +264,106 @@ def effective_mode(vendors: list[str] | None, regions: list[str] | None,
 # before it is sent.
 PLACEMENT_MODES: tuple[str, ...] = ("ordered", "cheapest", "compare")
 
+# HYPERUN-SERVING-PLAN. The words PACSrun's spec.placement.servingPlan accepts, repeated here
+# for the reason the vendor lists above are: so /v1/validate can name a bad value and list the
+# good ones before anything is sent, instead of the CRD's enum error arriving at create time.
+#
+# They are PACSrun's (api/v1alpha1/shared_types.go, ServingPlanSpec; the CRD enum lists the same
+# two models). A model is a preset NAME rather than its layer count and sizes, because the planner
+# reads those numbers from the preset (solver/shuntserve/plan.py, MODEL_PRESETS) and typing them
+# by hand is the likeliest way to get one wrong.
+SERVING_MODELS: tuple[str, ...] = ("llama-3.1-8b", "llama-3.1-70b")
+# The one planner, and the one placement word a serving plan is answered for. PACSrun refuses a
+# serving plan whose spec.placement.regions is anything but exactly [shadeform]
+# (internal/controller/placement.go, validateServingPlan), and Shadeform sells on demand only.
+SERVING_PLANNER = "shuntserve"
+SERVING_VENDOR = "shadeform"
+SERVING_CAPACITY = "on-demand"
+
+
+def decimal_text(value: float | None) -> str:
+    """Write a positive number the way PACSrun's CRD wants a decimal string.
+
+    WHY THIS IS NOT `str(value)`. The CRD's pattern for hourlyBudget is
+    `^[0-9]+(\\.[0-9]+)?$` (config/crd/hyperun.io_hyperunjobs.yaml), and Python writes small and
+    large floats in exponent form: str(0.00001) is "1e-05", which the pattern refuses. `repr`
+    gives the shortest text that reads back as the same float, so "2.0" stays "2.0" and
+    "20.8333" stays "20.8333"; Decimal then prints that without an exponent.
+
+    Args:
+        value: a finite number above 0. /v1/validate has refused anything else before a submit
+            gets here (check_serving_plan).
+
+    Returns:
+        e.g. "2.0", "20.8333", "0.00001".
+
+    Raises:
+        ValueError: the value is missing, not finite or not above 0, so no decimal string
+            describes it. A ValueError and not a TypeError, because main.submit turns a
+            ValueError from to_hyperunjob into a 400 that carries this message.
+    """
+    if value is None or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{value!r} is not a positive number")
+    return format(Decimal(repr(float(value))), "f")
+
+
+class ServingPlanRequest(BaseModel):
+    """HYPERUN-SERVING-PLAN. Ask the ShuntServe planner how to serve a model, instead of
+    asking for a GPU.
+
+    WHAT IT TURNS INTO. `to_hyperunjob` writes it as PACSrun's spec.placement.servingPlan, with
+    planner "shuntserve", and with the placement a serving plan needs: capacityType on-demand
+    and regions [shadeform]. PACSrun's planner then ranks up to 50 rental plans by SCORE, the
+    estimated requests per second per dollar-hour (throughput / cost per hour), every plan
+    within the hourly budget, on the Shadeform catalog the cluster refreshes every 10 minutes.
+    It writes them to status.servingPlans, which `JobView.serving_plans` returns, and names the
+    catalog in status.servingCatalog (`JobView.serving_catalog`).
+
+    WHAT THE MODE DECIDES. With placement_mode 'compare' the operator ranks and stops: nothing
+    is rented. With any other mode it rents the highest-score plan that runs on ONE machine
+    (the planner calls that plan executable) and runs this job's image there; `JobView.
+    serving_plan_chosen` says which plan and which attempt.
+
+    ★ THERE IS NO TARGET REQUEST RATE ANY MORE, AND A BODY THAT SENDS ONE IS REFUSED, NOT
+    IGNORED (2026-10-20). PACSrun removed `targetRPS` from the CRD (api/v1alpha1/
+    shared_types.go, ServingPlanSpec: "THERE IS NO TARGET REQUEST RATE (removed 2026-10-19, the
+    user's decision)"). A plan is now chosen for its score under the hourly budget, so it may
+    serve fewer requests per second than a number the caller had in mind. Dropping the field in
+    silence would rent a machine on a rule the caller did not ask for, so `extra="allow"` keeps
+    an unknown key here and validate.check_serving_plan refuses `target_rps` by name. PACSrun's
+    own planner refuses `--target-rps` together with `--rank` for the same reason
+    (solver/shuntserve/plan.py). `to_hyperunjob` copies only the four named fields, so nothing
+    extra reaches the CRD.
+
+    WHY EVERY FIELD MAY BE LEFT OUT HERE. A value that is missing or out of range is refused by
+    /v1/validate with a finding that names the field and the fix (validate.check_serving_plan),
+    and /v1/jobs refuses on the same findings. A pydantic constraint would refuse the same body
+    with a 422 that names a type rule instead, which is the less useful of the two answers.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str | None = Field(
+        default=None,
+        description=f"Which model to serve, as a preset name: {' or '.join(SERVING_MODELS)}. "
+        "The planner reads the layer count and sizes from the preset.",
+    )
+    avg_input_tokens: int | None = Field(
+        default=None,
+        description="Average prompt length of the traffic, in tokens. ShuntServe's own "
+        "workload is 763.",
+    )
+    avg_output_tokens: int | None = Field(
+        default=None,
+        description="Average answer length of the traffic, in tokens. ShuntServe's own "
+        "workload is 232.",
+    )
+    hourly_budget: float | None = Field(
+        default=None,
+        description="The most a plan may cost, in US dollars PER HOUR for all of its machines "
+        "together, e.g. 20.0. It is an hourly rate: there is no total budget and no duration.",
+    )
+
 
 class SubmitRequest(BaseModel):
     """The body of `POST /v1/jobs`.
@@ -426,6 +532,39 @@ class SubmitRequest(BaseModel):
         "Compared with the winner, the runner-up and the margin in its message. "
         "'compare' is the only mode that costs nothing to run.",
     )
+    serving_plan: ServingPlanRequest | None = Field(
+        default=None,
+        description="Ask the ShuntServe planner which Shadeform machines serve a model with the "
+        "most requests per second per dollar-hour within hourly_budget, instead of naming a "
+        "GPU. There is no target request rate. The job then goes out on-demand with regions "
+        "[shadeform]; leave capacity_type, vendors, regions, gpu and instance_type out. With "
+        "placement_mode 'compare' the plans are ranked and nothing is rented; with any other "
+        "mode the highest-score plan that runs on one machine is rented, this image runs there, "
+        "and parallelism must be 1. The ranked plans come back as `serving_plans` on the job, "
+        "with the catalog they were ranked on as `serving_catalog`. "
+        "HYPERUN-SERVING-PLAN.",
+    )
+
+    @model_validator(mode="after")
+    def serving_plan_placement(self) -> "SubmitRequest":
+        """Fill the two placement fields a serving plan leaves no choice about.
+
+        HYPERUN-SERVING-PLAN. capacity_type is otherwise the caller's decision and a submit
+        without it is refused rather than guessed (main.submit). For a serving plan there is
+        nothing to decide: Shadeform sells on demand only and PACSrun refuses a serving plan
+        with any other capacity type or with regions other than [shadeform]. So a BLANK is
+        filled here, once, and all three routes (/v1/estimate, /v1/validate, /v1/jobs) see the
+        same filled body. A value the caller DID send is left as sent, and when it contradicts
+        the plan /v1/validate refuses it by name (check_serving_plan) instead of this rewriting
+        it in silence.
+        """
+        if self.serving_plan is None:
+            return self
+        if self.capacity_type is None:
+            self.capacity_type = SERVING_CAPACITY
+        if not self.regions:
+            self.regions = [SERVING_VENDOR]
+        return self
 
     @model_validator(mode="after")
     def something_to_run(self) -> "SubmitRequest":
@@ -641,6 +780,26 @@ class ArtifactsResponse(BaseModel):
         "no resultPath, nothing is uploaded yet, or the path points outside "
         "this server's bucket and was refused.",
     )
+
+
+class ServingCheckResponse(BaseModel):
+    """What `GET /v1/jobs/{id}/serving-check` returns. HYPERUN-SERVING-CHECK-ROUTE.
+
+    The result file a serving check job writes (`serving-check-result.json`, schema
+    `hyperun.serving-check/v1`): the planner's estimate of throughput and latency next to what
+    vLLM actually measured on the rented machine. Read by the server and handed back whole,
+    because the browser cannot read it from S3 itself: the results bucket has no CORS rule, so
+    a page on another origin may follow a download link but may not read the bytes.
+    """
+
+    found: bool = Field(description="True when the file exists and carries the schema.")
+    name: str = Field(default="", description="The file read, relative to the result path.")
+    check: dict[str, Any] | None = Field(
+        default=None,
+        description="The file's JSON as written, when found. A value the job could not "
+        "measure is null in it, never 0.",
+    )
+    note: str = Field(default="", description="Why nothing was found, when it was not.")
 
 
 class ExecRequest(BaseModel):
@@ -883,6 +1042,172 @@ def placement_note(asked: list[str], regions: list[str], mode: str | None,
     return text
 
 
+# ---------------------------------------------------------------------------
+# HYPERUN-SERVING-PLAN, the answer side. PACSrun writes the planner's ranked list to
+# status.servingPlans and, when it rents one, the plan it rented to status.servingPlanChosen.
+# These views carry both across in this API's own spelling (snake_case, like every other
+# JobView field).
+#
+# MONEY AND RATES STAY DECIMAL STRINGS, exactly as PACSrun wrote them (dollars per hour to 4
+# places, requests per second to 3: PACSrun's ServingPlanStatus). Turning them into floats here
+# would only let 8.07 print as 8.069999999999999 somewhere downstream, and nothing in this
+# server does arithmetic on them.
+#
+# THE ZONE CROSSES THE API HERE AND NOT IN `instance`. JobView drops the zone and region of
+# status.currentOffering because they say where in OUR account a machine sits
+# (HYPERUN-NO-INTERNAL-NAMES). A stage's zone is a Shadeform marketplace region in a price
+# list ("montreal-canada-2"), the same fact `domain` already spells out, and a plan cannot be
+# read without it.
+# ---------------------------------------------------------------------------
+
+
+def _text(value: Any) -> str | None:
+    """A status value as text, or None when PACSrun did not write it."""
+    return None if value is None or value == "" else str(value)
+
+
+def _whole(value: Any) -> int:
+    """A status count as an int; anything unreadable is 0 rather than an exception, so one
+    malformed entry cannot make the whole job unreadable."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+class ServingStageView(BaseModel):
+    """One machine of a pipeline, and the layers it runs."""
+
+    instance_type: str = Field(description="`<cloud>_<shade_instance_type>`, e.g. "
+                               "`hyperstack_A100_80G`: the Shadeform machine.")
+    zone: str = Field(default="", description="The Shadeform region it is sold in.")
+    layers: int = Field(description="How many consecutive model layers this machine holds.")
+    tp: int = Field(description="Tensor-parallel size, which is the machine's GPU count.")
+    price_per_hour: str | None = Field(default=None, description="US dollars per hour.")
+
+
+class ServingPipelineView(BaseModel):
+    """One copy of the model, its layers split in order across its stages' machines."""
+
+    domain: str = Field(description="`<provider>/<region>`, e.g. "
+                        "`hyperstack/montreal-canada-2`. Every stage of one pipeline is in it.")
+    vendor: str = Field(default="", description="Who sells the pipeline's machines: "
+                        "`shadeform`, or `aws` for a plan priced from ShuntServe's AWS "
+                        "on-demand table, which is listed and never rented. Empty from an "
+                        "operator that does not write it.")
+    throughput_rps: str | None = Field(default=None, description="Estimated requests/second.")
+    cost_per_hour: str | None = Field(default=None, description="US dollars per hour.")
+    stages: list[ServingStageView] = Field(default_factory=list)
+
+
+class ServingPlanView(BaseModel):
+    """One rental plan from status.servingPlans."""
+
+    rank: int = Field(description="1 is the highest score: the most estimated requests per "
+                      "second per dollar-hour, every plan within the hourly budget. A tie goes "
+                      "to the cheaper plan. Rank 1 is NOT the cheapest plan.")
+    score: str | None = Field(default=None, description="ShuntServe's score, the number the "
+                              "ranks are sorted by: throughput_rps / cost_per_hour, requests "
+                              "per second per dollar-hour, as the planner computed it. Null "
+                              "from an operator that does not write it.")
+    price_basis: str = Field(default="", description="What the prices are for; `on_demand`.")
+    cost_per_hour: str | None = Field(default=None, description="The whole plan, every "
+                                      "machine together, in US dollars per hour.")
+    throughput_rps: str | None = Field(default=None, description="The planner's estimate, "
+                                       "requests per second: the sum of its pipelines'.")
+    latency_seconds: str | None = Field(default=None, description="The planner's estimate "
+                                        "of one request's latency on the plan's slowest "
+                                        "pipeline, in seconds. Null from an operator that does "
+                                        "not write it.")
+    nodes: int = Field(default=0, description="How many machines the plan rents.")
+    executable: bool | None = Field(default=None, description="True when one machine runs the "
+                                    "whole plan (one pipeline of one stage), the only kind of "
+                                    "plan a job can rent. Null from an operator that does not "
+                                    "write it.")
+    pipelines: list[ServingPipelineView] = Field(default_factory=list)
+
+
+class ServingPlanChosenView(BaseModel):
+    """status.servingPlanChosen: the plan the job rents, or last tried to rent. Absent in
+    compare mode. The wording below is PACSrun's CRD's (HYPERUN-SHUNTSERVE-EXECUTE)."""
+
+    rank: int = Field(description="Its rank in `serving_plans`.")
+    instance_type: str = Field(default="", description="The Shadeform instance type exactly "
+                               "as the driver pod is told to rent it, e.g. `A100_80G`; the "
+                               "provider and region are `cloud` and `region`.")
+    cloud: str = Field(default="", description="The provider behind Shadeform, e.g. "
+                       "`hyperstack`.")
+    region: str = Field(default="", description="The Shadeform region.")
+    cost_per_hour: str | None = Field(default=None, description="The plan's estimate, US "
+                                      "dollars per hour.")
+    throughput_rps: str | None = Field(default=None, description="The plan's estimate.")
+    latency_seconds: str | None = Field(default=None, description="The plan's estimate.")
+    score: str | None = Field(default=None, description="The plan's score, why it was chosen "
+                              "over the later ones: requests per second per dollar-hour.")
+    attempt: int = Field(default=0, description="How many plans this job has chosen, this one "
+                         "included: 1 first, one more on each failover to a different plan.")
+
+
+def serving_plans_from(status: dict[str, Any]) -> list[ServingPlanView]:
+    """status.servingPlans as views. An entry that is not an object is skipped."""
+    plans: list[ServingPlanView] = []
+    for plan in status.get("servingPlans") or []:
+        if not isinstance(plan, dict):
+            continue
+        pipelines = []
+        for pipe in plan.get("pipelines") or []:
+            if not isinstance(pipe, dict):
+                continue
+            stages = [
+                ServingStageView(
+                    instance_type=str(stage.get("instanceType") or ""),
+                    zone=str(stage.get("zone") or ""),
+                    layers=_whole(stage.get("layers")),
+                    tp=_whole(stage.get("tp")),
+                    price_per_hour=_text(stage.get("pricePerHour")),
+                )
+                for stage in pipe.get("stages") or [] if isinstance(stage, dict)
+            ]
+            pipelines.append(ServingPipelineView(
+                domain=str(pipe.get("domain") or ""),
+                vendor=str(pipe.get("vendor") or ""),
+                throughput_rps=_text(pipe.get("throughputRPS")),
+                cost_per_hour=_text(pipe.get("costPerHour")),
+                stages=stages,
+            ))
+        executable = plan.get("executable")
+        plans.append(ServingPlanView(
+            rank=_whole(plan.get("rank")),
+            score=_text(plan.get("score")),
+            price_basis=str(plan.get("priceBasis") or ""),
+            cost_per_hour=_text(plan.get("costPerHour")),
+            throughput_rps=_text(plan.get("throughputRPS")),
+            latency_seconds=_text(plan.get("latencySeconds")),
+            nodes=_whole(plan.get("nodes")),
+            executable=executable if isinstance(executable, bool) else None,
+            pipelines=pipelines,
+        ))
+    return plans
+
+
+def serving_plan_chosen_from(status: dict[str, Any]) -> ServingPlanChosenView | None:
+    """status.servingPlanChosen as a view, or None when the operator rented no plan."""
+    chosen = status.get("servingPlanChosen")
+    if not isinstance(chosen, dict) or not chosen:
+        return None
+    return ServingPlanChosenView(
+        rank=_whole(chosen.get("rank")),
+        instance_type=str(chosen.get("instanceType") or ""),
+        cloud=str(chosen.get("cloud") or ""),
+        region=str(chosen.get("region") or ""),
+        cost_per_hour=_text(chosen.get("costPerHour")),
+        throughput_rps=_text(chosen.get("throughputRPS")),
+        latency_seconds=_text(chosen.get("latencySeconds")),
+        score=_text(chosen.get("score")),
+        attempt=_whole(chosen.get("attempt")),
+    )
+
+
 class JobView(BaseModel):
     """What `GET /v1/jobs/{id}` returns.
 
@@ -1015,6 +1340,28 @@ class JobView(BaseModel):
         "now downloads through /v1/jobs/{id}/artifacts instead, but this field "
         "stays: the CLI and scripts read results with `aws s3 sync <this>`.",
     )
+    serving_plans: list[ServingPlanView] = Field(
+        default_factory=list,
+        description="HYPERUN-SERVING-PLAN. The planner's ranked rental plans for a job that "
+        "sent `serving_plan`, highest score (requests per second per dollar-hour) first, every "
+        "one within the hourly budget, up to 50, from status.servingPlans. "
+        "Empty until the planner has answered and for every other job. Left OUT of "
+        "GET /v1/jobs, whose rows are polled every 15 s: read GET /v1/jobs/{id}.",
+    )
+    serving_plan_chosen: ServingPlanChosenView | None = Field(
+        default=None,
+        description="HYPERUN-SERVING-PLAN. The plan this job rents, or last tried to rent, "
+        "from status.servingPlanChosen, with how many plans it has chosen so far. Null in "
+        "compare mode, which rents nothing, and before a plan is chosen.",
+    )
+    serving_catalog: str = Field(
+        default="",
+        description="HYPERUN-SERVING-PLAN. Which Shadeform catalog `serving_plans` was ranked "
+        "on and when it was fetched, in the operator's words, e.g. \"Shadeform catalog fetched "
+        "2026-10-20T02:39:32Z (live ConfigMap hyperun-shadeform-catalog)\". The cluster "
+        "refreshes it every 10 minutes, so two jobs with the same ask can get different lists "
+        "and stock is the reason. Empty from an operator that does not write it.",
+    )
 
     @staticmethod
     def from_hyperunjob(obj: dict[str, Any]) -> "JobView":
@@ -1107,6 +1454,9 @@ class JobView(BaseModel):
             stopped_at=status.get("stoppedAt"),
             cost_usd=cost,
             result_path=spec.get("resultPath"),
+            serving_plans=serving_plans_from(status),
+            serving_plan_chosen=serving_plan_chosen_from(status),
+            serving_catalog=str(status.get("servingCatalog") or ""),
         )
 
 
@@ -1198,7 +1548,9 @@ def to_hyperunjob(
         A dict ready to POST to the Kubernetes API.
 
     Raises:
-        ValueError: the request names a secret the operator has not bound.
+        ValueError: the request names a secret the operator has not bound, or it
+            carries a serving plan together with a capacity type, region or vendor
+            the plan cannot run under (HYPERUN-SERVING-PLAN).
     """
     env_entries: list[dict[str, Any]] = [
         {"name": key, "value": value} for key, value in sorted(request.env.items())
@@ -1348,6 +1700,40 @@ def to_hyperunjob(
     # was no way to ask for another (HYPERUN-AWS-ONE-REGION).
     if request.regions:
         placement["regions"] = list(request.regions)
+    if request.serving_plan is not None:
+        # HYPERUN-SERVING-PLAN. PACSrun's spec.placement.servingPlan, and the placement it
+        # requires: capacityType on-demand, regions exactly [shadeform], and no vendors (PACSrun
+        # checks regions alone, and a vendors list would add candidates the planner does not
+        # answer). The request model already filled the blanks, so for a body /v1/validate
+        # passed this only restates what is there; a body that contradicts it is refused here
+        # rather than rewritten, because a job that silently goes somewhere other than asked is
+        # the failure this file keeps writing comments about.
+        sp = request.serving_plan
+        clash = []
+        if capacity_type not in (None, SERVING_CAPACITY):
+            clash.append(f"capacity_type {capacity_type!r}")
+        if list(request.regions) != [SERVING_VENDOR]:
+            clash.append(f"regions {list(request.regions)!r}")
+        if request.vendors not in ([], [SERVING_VENDOR]):
+            clash.append(f"vendors {list(request.vendors)!r}")
+        if clash:
+            raise ValueError(
+                f"a serving plan runs on-demand on {SERVING_VENDOR} only, and this job also "
+                f"names {', '.join(clash)}. Leave those out; the server sends capacity_type "
+                f"{SERVING_CAPACITY} and regions [{SERVING_VENDOR}]."
+            )
+        placement["capacityType"] = SERVING_CAPACITY
+        placement["regions"] = [SERVING_VENDOR]
+        placement.pop("vendors", None)
+        placement["servingPlan"] = {
+            "planner": SERVING_PLANNER,
+            "model": sp.model,
+            "avgInputTokens": sp.avg_input_tokens,
+            "avgOutputTokens": sp.avg_output_tokens,
+            # A string, because PACSrun's API carries no floats (Kubernetes API conventions).
+            # No targetRPS: PACSrun removed it on 2026-10-19 and ranks by score instead.
+            "hourlyBudget": decimal_text(sp.hourly_budget),
+        }
     if placement:
         spec["placement"] = placement
 
