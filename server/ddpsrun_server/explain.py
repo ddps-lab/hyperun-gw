@@ -79,14 +79,17 @@ GPUS
 
 SERVING A MODEL
   Instead of "gpu", send "serving_plan": {"model": "llama-3.1-8b" or
-  "llama-3.1-70b", "avg_input_tokens", "avg_output_tokens", "target_rps",
-  "hourly_budget"}. The budget is US dollars PER HOUR for all of a plan's
-  machines together; there is no total budget and no duration. The ShuntServe
-  planner ranks up to 50 Shadeform plans, cheapest per hour first, and
-  GET /v1/jobs/{id} returns them as "serving_plans". With placement_mode
-  "compare" nothing is rented. Otherwise the cheapest plan that runs on one
-  machine is rented, your image runs there, and "serving_plan_chosen" says which;
-  if that rental fails the next one-machine plan is tried. Leave capacity_type,
+  "llama-3.1-70b", "avg_input_tokens", "avg_output_tokens", "hourly_budget"}.
+  The budget is US dollars PER HOUR for all of a plan's machines together;
+  there is no total budget and no duration. There is no target request rate:
+  the ShuntServe planner ranks up to 50 Shadeform plans by score, estimated
+  requests per second per dollar-hour, every plan within the budget, so rank 1
+  is the best value and not the cheapest. GET /v1/jobs/{id} returns them as
+  "serving_plans", each with its "score", and "serving_catalog" names the
+  Shadeform catalog they were ranked on. With placement_mode "compare" nothing
+  is rented. Otherwise the highest-score plan that runs on one machine is
+  rented, your image runs there, and "serving_plan_chosen" says which; if that
+  rental fails the next one-machine plan is tried. Leave capacity_type,
   vendors, regions and gpu out and keep parallelism 1: a plan runs on-demand on
   shadeform, one pod on one machine, and /v1/validate refuses anything else by
   name.

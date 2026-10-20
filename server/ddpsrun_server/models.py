@@ -284,7 +284,7 @@ SERVING_CAPACITY = "on-demand"
 def decimal_text(value: float | None) -> str:
     """Write a positive number the way PACSrun's CRD wants a decimal string.
 
-    WHY THIS IS NOT `str(value)`. The CRD's pattern for targetRPS and hourlyBudget is
+    WHY THIS IS NOT `str(value)`. The CRD's pattern for hourlyBudget is
     `^[0-9]+(\\.[0-9]+)?$` (config/crd/hyperun.io_hyperunjobs.yaml), and Python writes small and
     large floats in exponent form: str(0.00001) is "1e-05", which the pattern refuses. `repr`
     gives the shortest text that reads back as the same float, so "2.0" stays "2.0" and
@@ -313,20 +313,35 @@ class ServingPlanRequest(BaseModel):
 
     WHAT IT TURNS INTO. `to_hyperunjob` writes it as PACSrun's spec.placement.servingPlan, with
     planner "shuntserve", and with the placement a serving plan needs: capacityType on-demand
-    and regions [shadeform]. PACSrun's planner then ranks up to 50 rental plans (cheapest per
-    hour first) on its saved Shadeform price snapshot and writes them to status.servingPlans,
-    which `JobView.serving_plans` returns.
+    and regions [shadeform]. PACSrun's planner then ranks up to 50 rental plans by SCORE, the
+    estimated requests per second per dollar-hour (throughput / cost per hour), every plan
+    within the hourly budget, on the Shadeform catalog the cluster refreshes every 10 minutes.
+    It writes them to status.servingPlans, which `JobView.serving_plans` returns, and names the
+    catalog in status.servingCatalog (`JobView.serving_catalog`).
 
     WHAT THE MODE DECIDES. With placement_mode 'compare' the operator ranks and stops: nothing
-    is rented. With any other mode it rents the cheapest plan that runs on ONE machine (the
-    planner calls that plan executable) and runs this job's image there; `JobView.
+    is rented. With any other mode it rents the highest-score plan that runs on ONE machine
+    (the planner calls that plan executable) and runs this job's image there; `JobView.
     serving_plan_chosen` says which plan and which attempt.
+
+    ★ THERE IS NO TARGET REQUEST RATE ANY MORE, AND A BODY THAT SENDS ONE IS REFUSED, NOT
+    IGNORED (2026-10-20). PACSrun removed `targetRPS` from the CRD (api/v1alpha1/
+    shared_types.go, ServingPlanSpec: "THERE IS NO TARGET REQUEST RATE (removed 2026-10-19, the
+    user's decision)"). A plan is now chosen for its score under the hourly budget, so it may
+    serve fewer requests per second than a number the caller had in mind. Dropping the field in
+    silence would rent a machine on a rule the caller did not ask for, so `extra="allow"` keeps
+    an unknown key here and validate.check_serving_plan refuses `target_rps` by name. PACSrun's
+    own planner refuses `--target-rps` together with `--rank` for the same reason
+    (solver/shuntserve/plan.py). `to_hyperunjob` copies only the four named fields, so nothing
+    extra reaches the CRD.
 
     WHY EVERY FIELD MAY BE LEFT OUT HERE. A value that is missing or out of range is refused by
     /v1/validate with a finding that names the field and the fix (validate.check_serving_plan),
     and /v1/jobs refuses on the same findings. A pydantic constraint would refuse the same body
     with a 422 that names a type rule instead, which is the less useful of the two answers.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     model: str | None = Field(
         default=None,
@@ -342,10 +357,6 @@ class ServingPlanRequest(BaseModel):
         default=None,
         description="Average answer length of the traffic, in tokens. ShuntServe's own "
         "workload is 232.",
-    )
-    target_rps: float | None = Field(
-        default=None,
-        description="The request rate a plan must reach, in requests per second, e.g. 2.0.",
     )
     hourly_budget: float | None = Field(
         default=None,
@@ -523,13 +534,14 @@ class SubmitRequest(BaseModel):
     )
     serving_plan: ServingPlanRequest | None = Field(
         default=None,
-        description="Ask the ShuntServe planner which Shadeform machines would serve a model at "
-        "target_rps for the least money per hour, instead of naming a GPU. The job then goes "
-        "out on-demand with regions [shadeform]; leave capacity_type, vendors, regions, gpu and "
-        "instance_type out. With placement_mode 'compare' the plans are ranked and nothing is "
-        "rented; with any other mode the cheapest plan that runs on one machine is rented, this "
-        "image runs there, and parallelism must be 1. The ranked plans come back as "
-        "`serving_plans` on the job. "
+        description="Ask the ShuntServe planner which Shadeform machines serve a model with the "
+        "most requests per second per dollar-hour within hourly_budget, instead of naming a "
+        "GPU. There is no target request rate. The job then goes out on-demand with regions "
+        "[shadeform]; leave capacity_type, vendors, regions, gpu and instance_type out. With "
+        "placement_mode 'compare' the plans are ranked and nothing is rented; with any other "
+        "mode the highest-score plan that runs on one machine is rented, this image runs there, "
+        "and parallelism must be 1. The ranked plans come back as `serving_plans` on the job, "
+        "with the catalog they were ranked on as `serving_catalog`. "
         "HYPERUN-SERVING-PLAN.",
     )
 
@@ -1087,7 +1099,13 @@ class ServingPipelineView(BaseModel):
 class ServingPlanView(BaseModel):
     """One rental plan from status.servingPlans."""
 
-    rank: int = Field(description="1 is the cheapest per hour; a tie goes to the higher rate.")
+    rank: int = Field(description="1 is the highest score: the most estimated requests per "
+                      "second per dollar-hour, every plan within the hourly budget. A tie goes "
+                      "to the cheaper plan. Rank 1 is NOT the cheapest plan.")
+    score: str | None = Field(default=None, description="ShuntServe's score, the number the "
+                              "ranks are sorted by: throughput_rps / cost_per_hour, requests "
+                              "per second per dollar-hour, as the planner computed it. Null "
+                              "from an operator that does not write it.")
     price_basis: str = Field(default="", description="What the prices are for; `on_demand`.")
     cost_per_hour: str | None = Field(default=None, description="The whole plan, every "
                                       "machine together, in US dollars per hour.")
@@ -1120,6 +1138,8 @@ class ServingPlanChosenView(BaseModel):
                                       "dollars per hour.")
     throughput_rps: str | None = Field(default=None, description="The plan's estimate.")
     latency_seconds: str | None = Field(default=None, description="The plan's estimate.")
+    score: str | None = Field(default=None, description="The plan's score, why it was chosen "
+                              "over the later ones: requests per second per dollar-hour.")
     attempt: int = Field(default=0, description="How many plans this job has chosen, this one "
                          "included: 1 first, one more on each failover to a different plan.")
 
@@ -1153,6 +1173,7 @@ def serving_plans_from(status: dict[str, Any]) -> list[ServingPlanView]:
         executable = plan.get("executable")
         plans.append(ServingPlanView(
             rank=_whole(plan.get("rank")),
+            score=_text(plan.get("score")),
             price_basis=str(plan.get("priceBasis") or ""),
             cost_per_hour=_text(plan.get("costPerHour")),
             throughput_rps=_text(plan.get("throughputRPS")),
@@ -1177,6 +1198,7 @@ def serving_plan_chosen_from(status: dict[str, Any]) -> ServingPlanChosenView | 
         cost_per_hour=_text(chosen.get("costPerHour")),
         throughput_rps=_text(chosen.get("throughputRPS")),
         latency_seconds=_text(chosen.get("latencySeconds")),
+        score=_text(chosen.get("score")),
         attempt=_whole(chosen.get("attempt")),
     )
 
@@ -1316,7 +1338,8 @@ class JobView(BaseModel):
     serving_plans: list[ServingPlanView] = Field(
         default_factory=list,
         description="HYPERUN-SERVING-PLAN. The planner's ranked rental plans for a job that "
-        "sent `serving_plan`, cheapest per hour first, up to 50, from status.servingPlans. "
+        "sent `serving_plan`, highest score (requests per second per dollar-hour) first, every "
+        "one within the hourly budget, up to 50, from status.servingPlans. "
         "Empty until the planner has answered and for every other job. Left OUT of "
         "GET /v1/jobs, whose rows are polled every 15 s: read GET /v1/jobs/{id}.",
     )
@@ -1325,6 +1348,14 @@ class JobView(BaseModel):
         description="HYPERUN-SERVING-PLAN. The plan this job rents, or last tried to rent, "
         "from status.servingPlanChosen, with how many plans it has chosen so far. Null in "
         "compare mode, which rents nothing, and before a plan is chosen.",
+    )
+    serving_catalog: str = Field(
+        default="",
+        description="HYPERUN-SERVING-PLAN. Which Shadeform catalog `serving_plans` was ranked "
+        "on and when it was fetched, in the operator's words, e.g. \"Shadeform catalog fetched "
+        "2026-10-20T02:39:32Z (live ConfigMap hyperun-shadeform-catalog)\". The cluster "
+        "refreshes it every 10 minutes, so two jobs with the same ask can get different lists "
+        "and stock is the reason. Empty from an operator that does not write it.",
     )
 
     @staticmethod
@@ -1420,6 +1451,7 @@ class JobView(BaseModel):
             result_path=spec.get("resultPath"),
             serving_plans=serving_plans_from(status),
             serving_plan_chosen=serving_plan_chosen_from(status),
+            serving_catalog=str(status.get("servingCatalog") or ""),
         )
 
 
@@ -1693,8 +1725,8 @@ def to_hyperunjob(
             "model": sp.model,
             "avgInputTokens": sp.avg_input_tokens,
             "avgOutputTokens": sp.avg_output_tokens,
-            # Strings, because PACSrun's API carries no floats (Kubernetes API conventions).
-            "targetRPS": decimal_text(sp.target_rps),
+            # A string, because PACSrun's API carries no floats (Kubernetes API conventions).
+            # No targetRPS: PACSrun removed it on 2026-10-19 and ranks by score instead.
             "hourlyBudget": decimal_text(sp.hourly_budget),
         }
     if placement:

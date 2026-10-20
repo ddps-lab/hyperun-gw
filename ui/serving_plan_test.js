@@ -2,14 +2,16 @@
  *
  * WHAT IT PINS (HYPERUN-SERVING-PLAN, HYPERUN-SERVING-CHECK).
  *   1. readForm sends a `serving_plan` block exactly when a model is chosen, with the two token
- *      counts as integers, the two rates as decimals, and an empty box as null -- so the
- *      server's validate names the missing field instead of this screen guessing one.
+ *      counts as integers, the hourly budget as a decimal, no target rate (PACSrun removed it on
+ *      2026-10-19), and an empty box as null -- so the server's validate names the missing
+ *      field instead of this screen guessing one.
  *   2. servingRules forces what a serving plan leaves no choice about (on-demand, no vendor, no
  *      region, no GPU), gives it all back when the model is cleared, and says whether the job
  *      will rent anything.
  *   3. servingPlanHtml draws the ranked plans from fixture data shaped like GET /v1/jobs/{id}:
- *      one row per pipeline, the plan's numbers spanning them, the rented plan marked with its
- *      attempt, and a one-line note in compare mode that nothing was rented.
+ *      one row per pipeline, the plan's numbers spanning them with its score first, the rented
+ *      plan marked with its attempt, the catalog the plans were ranked on, a one-line note in
+ *      compare mode that nothing was rented, and rank 1 never called "cheapest".
  *   4. servingCheckHtml lays the planner's estimate beside what vLLM measured, from a fixture
  *      shaped like the serving check's `serving-check-result.json` (hyperun.serving-check/v1),
  *      and prints null as "not measured", never as 0.
@@ -107,7 +109,6 @@ function setForm(o) {
   $("f-serve-model").value = o.model ?? "";
   $("f-serve-in").value = o.input ?? "";
   $("f-serve-out").value = o.output ?? "";
-  $("f-serve-rps").value = o.rps ?? "";
   $("f-serve-budget").value = o.budget ?? "";
   vendorBoxes.forEach((b) => { b.checked = (o.vendors || []).includes(b.dataset.vendor); b.disabled = false; });
   capacityOptions.concat(modeOptions).forEach((opt) => { opt.disabled = false; });
@@ -119,17 +120,17 @@ console.log("readForm: the serving_plan block");
 setForm({});
 check(!("serving_plan" in readForm()), "no model chosen sends no serving_plan at all");
 
-setForm({ model: "llama-3.1-8b", input: "763", output: "232", rps: "2.5", budget: "20.8333" });
+setForm({ model: "llama-3.1-8b", input: "763", output: "232", budget: "20.8333" });
 let body = readForm();
 check(JSON.stringify(body.serving_plan) === JSON.stringify({
-  model: "llama-3.1-8b", avg_input_tokens: 763, avg_output_tokens: 232,
-  target_rps: 2.5, hourly_budget: 20.8333,
-}), "a chosen model sends the five fields, tokens as integers and the two rates as decimals");
+  model: "llama-3.1-8b", avg_input_tokens: 763, avg_output_tokens: 232, hourly_budget: 20.8333,
+}), "a chosen model sends the four fields, tokens as integers and the budget as a decimal");
+check(!("target_rps" in body.serving_plan),
+  "no target rate is sent: PACSrun ranks by score under the budget and the server refuses one");
 
 setForm({ model: "llama-3.1-70b", input: "763" });
 body = readForm();
-check(body.serving_plan.avg_output_tokens === null && body.serving_plan.target_rps === null &&
-      body.serving_plan.hourly_budget === null,
+check(body.serving_plan.avg_output_tokens === null && body.serving_plan.hourly_budget === null,
   "an empty box goes out as null, so validate names it; the placeholder is not a default");
 
 // ---------------------------------------------------------------------------------------------
@@ -152,9 +153,10 @@ check(modeOptions.every((o) => !o.disabled),
   "the gcp box it unchecked no longer pins the mode to compare (vendorRules ran)");
 check(summaryNote.textContent === "llama-3.1-8b, sent with this job",
   "the folded section's summary says a plan is still being sent");
-check(/rents the cheapest plan that runs on one machine/.test($("f-serve-note").innerHTML) &&
-      /Choose compare/.test($("f-serve-note").innerHTML),
-  "under cheapest the note says the job will rent, and how to only rank instead");
+check(/rents the highest-score plan/.test($("f-serve-note").innerHTML) &&
+      /Choose compare/.test($("f-serve-note").innerHTML) &&
+      !/rents the cheapest plan/.test($("f-serve-note").innerHTML),
+  "under a renting mode the note says the best-score plan is rented, and how to only rank instead");
 
 $("f-mode").value = "compare";
 servingRules();
@@ -170,11 +172,12 @@ check(!capacityOptions[1].disabled && vendorBoxes.every((b) => !b.disabled) &&
 
 // ---------------------------------------------------------------------------------------------
 // Fixture: GET /v1/jobs/{id}, built from the real planner output PACSrun keeps as a fixture
-// (rank_shadeform_2026-10-19.json): rank 1 is two pipelines on five machines, rank 3 one
-// 8-GPU machine.
+// (rank_shadeform_2026-10-19.json) and re-ranked by score as PACSrun does since 2026-10-19:
+// two pipelines on five machines score 0.308 and are rank 2, one 8-GPU machine scores 1.137 and
+// is rank 1. The first entry is listed second on purpose, so the table's order is the server's.
 // ---------------------------------------------------------------------------------------------
 const PLANS = [
-  { rank: 1, price_basis: "on_demand", cost_per_hour: "8.0700", throughput_rps: "2.488",
+  { rank: 2, score: "0.308", price_basis: "on_demand", cost_per_hour: "8.0700", throughput_rps: "2.488",
     latency_seconds: "26.021", nodes: 5, executable: false, pipelines: [
       { domain: "hyperstack/montreal-canada-2", throughput_rps: "1.274", cost_per_hour: "4.0500",
         stages: [
@@ -186,33 +189,47 @@ const PLANS = [
         stages: [
           { instance_type: "massedcompute_L40S", zone: "kansascity-usa-1", layers: 16, tp: 1,
             price_per_hour: "0.8800" }] }] },
-  { rank: 3, price_basis: "on_demand", cost_per_hour: "10.8000", throughput_rps: "12.283",
+  { rank: 1, score: "1.137", price_basis: "on_demand", cost_per_hour: "10.8000", throughput_rps: "12.283",
     latency_seconds: "2.042", nodes: 1, executable: true, pipelines: [
       { domain: "excesssupply/omaha-usa-2", throughput_rps: "12.283", cost_per_hour: "10.8000",
         stages: [{ instance_type: "excesssupply_A100_sxm4_80Gx8_2", zone: "omaha-usa-2",
                    layers: 80, tp: 8, price_per_hour: "10.8000" }] }] },
 ];
 const ASKED = { planner: "shuntserve", model: "llama-3.1-70b", avgInputTokens: 763,
-                avgOutputTokens: 232, targetRPS: "2.0", hourlyBudget: "20.8333" };
+                avgOutputTokens: 232, hourlyBudget: "20.8333" };
 // instance_type is the bare Shadeform type the driver rents; the provider is `cloud` (PACSrun CRD).
-const CHOSEN = { rank: 3, instance_type: "A100_sxm4_80Gx8_2", cloud: "excesssupply",
+const CHOSEN = { rank: 1, instance_type: "A100_sxm4_80Gx8_2", cloud: "excesssupply",
                  region: "omaha-usa-2", cost_per_hour: "10.8000", throughput_rps: "12.283",
-                 latency_seconds: "2.042", attempt: 2 };
+                 latency_seconds: "2.042", score: "1.137", attempt: 2 };
+const CATALOG = "Shadeform catalog fetched 2026-10-20T02:39:32Z (live ConfigMap " +
+                "hyperun-shadeform-catalog)";
 
 console.log("servingPlanHtml: the ranked table");
 
 let view = servingPlanHtml({ phase: "Compared", placement_mode: "compare", serving_plans: PLANS,
-                             serving_plan_chosen: null }, ASKED);
+                             serving_plan_chosen: null, serving_catalog: CATALOG }, ASKED);
 check(view.html.startsWith("[info] Compare mode: these plans were priced and nothing was rented."),
   "compare mode leads with the one line that nothing was rented");
-check(view.summary === "2 plans, cheapest $8.0700/h, nothing rented",
-  "the folded summary carries the count, the cheapest price and that nothing was rented");
-check(view.html.includes("Asked for llama-3.1-70b, 763 tokens in and 232 out, 2.0 req/s within $20.8333/h."),
-  "the ask is restated from the spec, budget as dollars per hour");
+check(view.summary === "2 plans, rank 1 scores 1.137 at $10.8000/h, nothing rented",
+  "the folded summary carries the count, rank 1's score and price, and that nothing was rented");
+check(!view.summary.includes("cheapest") && !view.html.includes("cheapest"),
+  "nothing calls a plan the cheapest: rank 1 is the best score, and can cost more per hour");
+check(view.html.includes("Asked for llama-3.1-70b, 763 tokens in and 232 out, the most requests " +
+                         "per second per dollar within $20.8333/h."),
+  "the ask is restated from the spec without a target rate, budget as dollars per hour");
+check(view.html.includes("Ranked on: Shadeform catalog fetched 2026-10-20T02:39:32Z (live ConfigMap " +
+                         "hyperun-shadeform-catalog)"),
+  "the catalog the plans were ranked on is named, with its fetch time");
+check(view.html.includes("<th>Rank</th><th>Domain</th><th>VM(s)</th><th title=") &&
+      /Score<\/th><th>req\/s<\/th>/.test(view.html),
+  "a Score column sits before req/s, the number the ranks are sorted by");
+check(view.html.includes('<td class="num span-top" rowspan="2">0.308</td>') &&
+      view.html.includes('<td class="num span-top">1.137</td>'),
+  "each plan's score is the server's string");
 check((view.html.match(/<tr>|<tr class/g) || []).length === 1 + 3,
-  "one header row and one row per PIPELINE: rank 1 has two, rank 3 has one");
-check((view.html.match(/rowspan="2"/g) || []).length === 5,
-  "rank 1's rank, req/s, $/h, latency and executable span its two pipeline rows");
+  "one header row and one row per PIPELINE: the five-machine plan has two, the 8-GPU plan one");
+check((view.html.match(/rowspan="2"/g) || []).length === 6,
+  "the five-machine plan's rank, score, req/s, $/h, latency and executable span its two rows");
 check(view.html.includes('hyperstack_A100_80Gx2 <span class="dim">53 layers, TP 2</span><br>' +
                          'hyperstack_A100_80G <span class="dim">27 layers, TP 1</span>'),
   "a pipeline names each machine with the layers it holds and its TP, in stage order");
@@ -231,10 +248,10 @@ check(!view.html.includes("Compare mode"), "a renting job gets no compare note")
 check((view.html.match(/<tr class="chosen">/g) || []).length === 1 &&
       view.html.includes("<b>chosen</b>, attempt 2"),
   "the rented plan's row is marked, in words, with its attempt number");
-check(view.html.includes("rank 3, attempt 2") && view.html.includes("excesssupply / omaha-usa-2") &&
+check(view.html.includes("rank 1, attempt 2") && view.html.includes("1.137 req/s per $/h") && view.html.includes("excesssupply / omaha-usa-2") &&
       view.html.includes("$10.8000/h"),
   "the facts above the table name the rented plan, where it is and what it costs");
-check(view.summary === "2 plans, cheapest $8.0700/h, rented rank 3",
+check(view.summary === "2 plans, rank 1 scores 1.137 at $10.8000/h, rented rank 1",
   "the summary says which rank was rented");
 
 const older = PLANS.map((p) => ({ ...p, executable: undefined, latency_seconds: undefined }));
@@ -282,8 +299,8 @@ check(view.html.includes('<td>Throughput at full load</td><td class="num">16.953
 check(view.html.includes('<td>Latency of one request alone</td><td class="num">1.76 s</td>' +
                          '<td class="num">1.9 s</td><td class="num">1.08</td>'),
   "latency: the planner's 1.76 s beside the measured 1.9 s");
-check(view.html.includes('<td class="num">4.67 req/s</td><td class="num">4.61 req/s, held</td>'),
-  "the target-rate run says what it reached and whether the rate was held");
+check(!view.html.includes("Target rate") && !view.html.includes("4.67"),
+  "no Target rate row: a serving plan has no target request rate since 2026-10-19");
 check(view.html.includes("NVIDIA A100 80GB PCIe × 1") &&
       view.html.includes("hyperstack / montreal-canada-2 A100_80G, $1.35/h"),
   "the facts name the card that was measured and the plan row it came from");
@@ -298,8 +315,6 @@ check(view.html.startsWith("[err] The check failed in bench-2/3: server died."),
   "a failed check leads with the phase it failed in and its reason");
 check(view.html.includes('<td class="num">not measured</td>') && !/>0 req\/s</.test(view.html),
   "a null measurement prints as not measured, never as 0");
-check(view.html.includes('<td class="num">4.61 req/s, not measured</td>'),
-  "a target run with no verdict on whether the rate held says not measured, rather than held or not held");
 check(view.summary === "failed in bench-2/3", "the summary says it failed and where");
 
 view = servingCheckHtml({ found: false, note: "serving-check-result.json is not in this job's result path (yet)." });

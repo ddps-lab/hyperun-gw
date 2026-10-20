@@ -765,14 +765,14 @@
          box, a region or a GPU would each be refused or ignored, and a rented plan is one machine
          running one pod. servingRules() sets capacity to on-demand and parallelism to 1, clears
          and disables the vendor boxes, the regions and the GPU, and says so in the note below. Placement mode is NOT changed: compare ranks the plans and rents
-         nothing, any other mode rents the cheapest plan that runs on one machine, and the note
+         nothing, any other mode rents the highest-score plan that runs on one machine, and the note
          says which of the two this form will do.
          FOLDED, IT STILL SENDS WHAT IS IN IT, so the summary says so (the HYPERUN-TRAINING-SIZE
          rule). -->
     <details class="acc" id="f-serving">
       <summary>
         <span class="acc-title">Serving plan</span>
-        <span class="acc-note">optional: which Shadeform machines serve a model at your request rate</span>
+        <span class="acc-note">optional: which Shadeform machines serve a model best per dollar</span>
         <span class="spacer"></span>
       </summary>
       <div class="acc-body">
@@ -787,8 +787,6 @@
             <input id="f-serve-in" type="number" min="1" step="1" placeholder="763"></label>
           <label><span><b>Average output</b> <span class="dim">tokens per answer</span></span>
             <input id="f-serve-out" type="number" min="1" step="1" placeholder="232"></label>
-          <label><span><b>Target rate</b> <span class="dim">requests per second</span></span>
-            <input id="f-serve-rps" type="number" min="0" step="any" placeholder="2.0"></label>
           <label><span><b>Hourly budget</b> <span class="dim">$/h for all machines together</span></span>
             <input id="f-serve-budget" type="number" min="0" step="any" placeholder="20.00"></label>
         </div>

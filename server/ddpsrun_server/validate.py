@@ -1411,19 +1411,35 @@ def check_serving_plan(serving_plan: "models.ServingPlanRequest | None",
                 + ("prompt" if field_name == "avg_input_tokens" else "answer")
                 + " in your traffic, in tokens, and PACSrun refuses anything below 1.",
                 f"Send a whole number of tokens; ShuntServe's own workload is {example}."))
-    for field_name, value, what, example in (
-            ("target_rps", sp.target_rps, "the request rate a plan must reach, in requests "
-             "per second", "2.0"),
-            ("hourly_budget", sp.hourly_budget, "the most a plan may cost in US dollars PER "
-             "HOUR for all of its machines together (an hourly rate: there is no total budget "
-             "and no duration)", "20.0")):
-        if value is None or not math.isfinite(value) or value <= 0:
+    budget_value = sp.hourly_budget
+    if budget_value is None or not math.isfinite(budget_value) or budget_value <= 0:
+        findings.append(Finding(
+            ERROR, "serving-plan-hourly-budget",
+            "serving_plan.hourly_budget is "
+            + ("missing" if budget_value is None else f"{budget_value}")
+            + ". It is the most a plan may cost in US dollars PER HOUR for all of its machines "
+            "together (an hourly rate: there is no total budget and no duration), and PACSrun "
+            "refuses a value that is not above 0.",
+            "Send a number above 0, e.g. 20.0."))
+
+    # HYPERUN-SERVING-PLAN. ★ A TARGET RATE IS REFUSED BY NAME, NOT DROPPED. PACSrun removed
+    # targetRPS on 2026-10-19: plans are ranked by score (requests per second per dollar-hour)
+    # under the hourly budget, and nothing is chosen for reaching a rate. A body that still
+    # sends one was written against the old rule, and running it would rent a plan that may
+    # serve fewer requests per second than the number in it. ServingPlanRequest keeps unknown
+    # keys (extra="allow") so this can see the field; both spellings are caught because a file
+    # copied from a HyperunJob carries the CRD's.
+    sent_extra = sp.model_extra or {}
+    for stale in ("target_rps", "targetRPS"):
+        if stale in sent_extra:
             findings.append(Finding(
-                ERROR, "serving-plan-" + field_name.replace("_", "-"),
-                f"serving_plan.{field_name} is "
-                + ("missing" if value is None else f"{value}")
-                + f". It is {what}, and PACSrun refuses a value that is not above 0.",
-                f"Send a number above 0, e.g. {example}."))
+                ERROR, "serving-plan-target-rps-removed",
+                f"serving_plan.{stale} is {sent_extra[stale]!r}, and a serving plan has no "
+                f"target request rate any more. The planner ranks plans by score, estimated "
+                f"requests per second per dollar-hour, among those within hourly_budget; the "
+                f"rate each plan reaches is its estimate, shown as throughput_rps, not an input.",
+                f"Remove {stale}. Read throughput_rps on the ranked plans (placement_mode "
+                f"compare rents nothing) and raise hourly_budget if no plan is fast enough."))
 
     if capacity_type not in (None, models.SERVING_CAPACITY):
         findings.append(Finding(
@@ -1480,15 +1496,15 @@ def check_serving_plan(serving_plan: "models.ServingPlanRequest | None",
     if not renting:
         findings.append(Finding(
             INFO, "serving-plan-compare",
-            "mode 'compare' with a serving plan: the planner ranks up to 50 plans, cheapest per "
-            "hour first, and NOTHING is rented. The plans appear on the job's page and as "
+            "mode 'compare' with a serving plan: the planner ranks up to 50 plans, highest "
+            "score (requests per second per dollar-hour) first, and NOTHING is rented. The plans appear on the job's page and as "
             "`serving_plans` in GET /v1/jobs/{id}."))
     else:
         findings.append(Finding(
             INFO, "serving-plan-rents",
-            f"without mode 'compare' the operator rents the cheapest plan that runs on ONE "
-            f"machine and runs this image there, billed at that plan's hourly price, which "
-            f"the planner keeps within {budget}. If that rental fails it moves to the next "
+            f"without mode 'compare' the operator rents the highest-score plan (most requests "
+            f"per second per dollar-hour) that runs on ONE machine and runs this image there, "
+            f"billed at that plan's hourly price, which the planner keeps within {budget}. If that rental fails it moves to the next "
             f"one-machine plan, and when there is none the job fails. A plan spread over "
             f"several machines is listed but cannot be rented yet.",
             "Submit with placement_mode compare first to see the ranked plans; it rents "
@@ -1618,9 +1634,11 @@ def validate(
     if serving_plan is not None:
         not_checked.insert(
             0,
-            "whether any plan reaches your target rate within your hourly budget. The planner "
-            "answers that after submit, from the Shadeform price snapshot saved in PACSrun, and "
-            "that snapshot says nothing about which machines are in stock now.",
+            "whether any plan within your hourly budget is fast enough for your traffic, and "
+            "whether the machine it names is still in stock when the job is placed. The planner "
+            "answers after submit, from the Shadeform catalog the cluster refreshes every 10 "
+            "minutes (the job's serving_catalog names which one), so a plan may be gone by the "
+            "time it is rented.",
         )
     if instance_type:
         not_checked.insert(

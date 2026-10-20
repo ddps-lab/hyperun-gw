@@ -1533,15 +1533,14 @@ def test_a_job_without_a_pin_does_not_ask_for_the_schema(fake):
 # ------------------------------------------------------------ HYPERUN-SERVING-PLAN
 
 SERVING_FLAGS = ["--serving-model", "llama-3.1-8b", "--avg-input-tokens", "763",
-                 "--avg-output-tokens", "232", "--target-rps", "2.0", "--hourly-budget", "20.8333"]
+                 "--avg-output-tokens", "232", "--hourly-budget", "20.8333"]
 
 
 def test_the_serving_flags_build_the_servers_serving_plan_block():
     body = cli.build_submit_body(args_for(["submit", "--name", "x", "--image", "i"]
                                           + SERVING_FLAGS))
     assert body["serving_plan"] == {"model": "llama-3.1-8b", "avg_input_tokens": 763,
-                                    "avg_output_tokens": 232, "target_rps": 2.0,
-                                    "hourly_budget": 20.8333}
+                                    "avg_output_tokens": 232, "hourly_budget": 20.8333}
     # Nothing else is invented here: the server fills capacity type and region.
     assert "capacity_type" not in body and "regions" not in body
 
@@ -1550,11 +1549,20 @@ def test_a_flag_overrides_one_field_of_the_files_serving_plan(tmp_path):
     job = tmp_path / "serve.yaml"
     job.write_text("name: serve\nimage: vllm/vllm-openai:v0.10.0\nserving_plan:\n"
                    "  model: llama-3.1-70b\n  avg_input_tokens: 763\n  avg_output_tokens: 232\n"
-                   "  target_rps: 2.0\n  hourly_budget: 20.8333\n")
-    body = cli.build_submit_body(args_for(["submit", "-f", str(job), "--target-rps", "4.67"]))
-    assert body["serving_plan"]["target_rps"] == 4.67
+                   "  hourly_budget: 20.8333\n")
+    body = cli.build_submit_body(args_for(["submit", "-f", str(job), "--hourly-budget", "4.67"]))
+    assert body["serving_plan"]["hourly_budget"] == 4.67
     assert body["serving_plan"]["model"] == "llama-3.1-70b"
-    assert body["serving_plan"]["hourly_budget"] == 20.8333
+    assert body["serving_plan"]["avg_input_tokens"] == 763
+
+
+def test_there_is_no_target_rate_flag_any_more(capsys):
+    """HYPERUN-SERVING-PLAN. PACSrun ranks by score under the hourly budget since 2026-10-19 and
+    has no target rate, so the flag is gone; argparse refuses it rather than this CLI sending
+    a field the server would refuse anyway."""
+    with pytest.raises(SystemExit):
+        args_for(["submit", "--name", "x", "--image", "i", "--target-rps", "2.0"])
+    assert "--target-rps" in capsys.readouterr().err
 
 
 def test_a_job_without_serving_flags_sends_no_serving_plan():
@@ -1574,21 +1582,26 @@ def test_a_server_that_does_not_know_serving_plan_is_never_sent_one(fake, capsys
     assert fake.submitted is None and sent == []
 
 
-def test_status_names_the_rented_plan_and_the_cheapest_ranked_one(fake, capsys):
+def test_status_names_the_rented_plan_the_best_scored_one_and_the_catalog(fake, capsys):
     fake.status_result = {
         "job_id": "job-a8acdef80a07", "name": "serve", "phase": "Running",
-        "serving_plan_chosen": {"rank": 3, "instance_type": "A100_sxm4_80Gx8_2",
+        "serving_plan_chosen": {"rank": 2, "instance_type": "A100_sxm4_80Gx8_2",
                                 "cloud": "excesssupply", "region": "omaha-usa-2",
                                 "cost_per_hour": "10.8000", "throughput_rps": "12.283",
-                                "latency_seconds": "2.042", "attempt": 2},
-        "serving_plans": [{"rank": 1, "cost_per_hour": "8.0700", "throughput_rps": "2.488",
-                           "nodes": 5, "pipelines": []}],
+                                "latency_seconds": "2.042", "score": "1.137", "attempt": 2},
+        "serving_plans": [{"rank": 1, "score": "1.540", "cost_per_hour": "8.0700",
+                           "throughput_rps": "12.430", "nodes": 5, "pipelines": []}],
+        "serving_catalog": "Shadeform catalog fetched 2026-10-20T02:39:32Z (live ConfigMap "
+                           "hyperun-shadeform-catalog)",
     }
     assert run(["status", "job-a8acdef80a07"]) == cli.EXIT_OK
     out = capsys.readouterr().out
-    assert ("serving    plan 3: A100_sxm4_80Gx8_2 (excesssupply / omaha-usa-2), "
-            "$10.8000/h, estimated 12.283 req/s, attempt 2") in out
-    assert "1 ranked; the cheapest is $8.0700/h for 2.488 req/s on 5 machine(s)" in out
+    assert ("serving    plan 2: A100_sxm4_80Gx8_2 (excesssupply / omaha-usa-2), "
+            "$10.8000/h, estimated 12.283 req/s, score 1.137, attempt 2") in out
+    assert ("1 ranked; rank 1 is $8.0700/h for 12.430 req/s on 5 machine(s) "
+            "(score 1.540 req/s per $/h)") in out
+    assert "cheapest" not in out
+    assert "catalog    Shadeform catalog fetched 2026-10-20T02:39:32Z" in out
 
 
 def test_status_of_an_ordinary_job_says_nothing_about_serving(fake, capsys):

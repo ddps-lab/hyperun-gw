@@ -757,22 +757,21 @@ def test_the_old_a100_name_goes_to_hyperun_as_the_new_one():
 
 # ---------------------------------------------------------------- HYPERUN-SERVING-PLAN
 
-# The ask ShuntServe's README workload makes: 763 tokens in, 232 out, 2.0 req/s, and the
-# hourly budget the planner commit ranked against ($20.8333/h).
+# The ask ShuntServe's README workload makes: 763 tokens in, 232 out, and the hourly budget the
+# planner commit ranked against ($20.8333/h). No target rate: PACSrun removed it on 2026-10-19.
 SERVING = {"model": "llama-3.1-70b", "avg_input_tokens": 763, "avg_output_tokens": 232,
-           "target_rps": 2.0, "hourly_budget": 20.8333}
+           "hourly_budget": 20.8333}
 
 
 def test_a_serving_plan_becomes_the_operators_serving_plan_block():
     """The CRD's own field names and types: planner fixed to shuntserve, tokens as integers,
-    the two rates as decimal STRINGS (PACSrun's API carries no floats)."""
+    the budget as a decimal STRING (PACSrun's API carries no floats), and no targetRPS."""
     obj = to_hyperunjob(minimal(serving_plan=SERVING, placement_mode="compare"),
                         ALICE, SETTINGS, JOB_ID, "on-demand")
     placement = obj["spec"]["placement"]
     assert placement["servingPlan"] == {
         "planner": "shuntserve", "model": "llama-3.1-70b",
-        "avgInputTokens": 763, "avgOutputTokens": 232,
-        "targetRPS": "2.0", "hourlyBudget": "20.8333",
+        "avgInputTokens": 763, "avgOutputTokens": 232, "hourlyBudget": "20.8333",
     }
     # The placement PACSrun's validateServingPlan requires, and no vendors list: PACSrun reads
     # regions alone, and a vendors list would add candidates the planner does not answer.
@@ -799,8 +798,19 @@ def test_a_serving_plan_fills_capacity_and_region_and_nothing_else():
     assert minimal().capacity_type is None and minimal().regions == []
 
 
+def test_a_target_rate_sent_anyway_never_reaches_the_operator():
+    """HYPERUN-SERVING-PLAN. The request keeps an unknown key so validate can refuse
+    `target_rps` by name; this pins the other half, that the key is not copied into the CRD
+    even if something calls to_hyperunjob without validating first."""
+    request = minimal(serving_plan={**SERVING, "target_rps": 2.0}, placement_mode="compare")
+    assert request.serving_plan.model_extra == {"target_rps": 2.0}
+    obj = to_hyperunjob(request, ALICE, SETTINGS, JOB_ID, "on-demand")
+    assert "targetRPS" not in obj["spec"]["placement"]["servingPlan"]
+    assert "target_rps" not in obj["spec"]["placement"]["servingPlan"]
+
+
 def test_without_compare_the_serving_job_goes_out_in_the_renting_mode():
-    """No mode written is PACSrun's `ordered`, which with a serving plan rents the cheapest
+    """No mode written is PACSrun's `ordered`, which with a serving plan rents the highest-score
     plan that runs on one machine. The gateway does not turn it into `cheapest` the way it
     does for a job naming no vendor, because this job names its region."""
     obj = to_hyperunjob(minimal(serving_plan=SERVING), ALICE, SETTINGS, JOB_ID, "on-demand")
@@ -845,12 +855,23 @@ def test_the_decimal_strings_match_the_crds_pattern():
 
 
 # status.servingPlans and status.servingPlanChosen as the operator writes them, built from the
-# real planner output PACSrun keeps as a test fixture (rank_shadeform_2026-10-19.json): rank 1
-# is two pipelines on five machines and cannot be rented, rank 3 is one 8-GPU machine.
+# real planner output PACSrun keeps as a test fixture (rank_shadeform_2026-10-19.json), re-ranked
+# by score as PACSrun has since 2026-10-19: one 8-GPU machine at 12.283 req/s for $10.80/h scores
+# 1.137 and is rank 1; two pipelines on five machines at 2.488 req/s for $8.07/h score 0.308 and
+# are rank 2. Rank 1 is the dearer plan per hour, which is exactly why "cheapest" was wrong.
 SERVING_STATUS = {
     "phase": "Running",
+    "servingCatalog": "Shadeform catalog fetched 2026-10-20T02:39:32Z (live ConfigMap "
+                      "hyperun-shadeform-catalog)",
     "servingPlans": [
-        {"rank": 1, "priceBasis": "on_demand", "costPerHour": "8.0700",
+        {"rank": 1, "score": "1.137", "priceBasis": "on_demand", "costPerHour": "10.8000",
+         "throughputRPS": "12.283", "latencySeconds": "2.042", "nodes": 1, "executable": True,
+         "pipelines": [
+             {"domain": "excesssupply/omaha-usa-2", "throughputRPS": "12.283",
+              "costPerHour": "10.8000", "stages": [
+                  {"instanceType": "excesssupply_A100_sxm4_80Gx8_2", "zone": "omaha-usa-2",
+                   "layers": 80, "tp": 8, "pricePerHour": "10.8000"}]}]},
+        {"rank": 2, "score": "0.308", "priceBasis": "on_demand", "costPerHour": "8.0700",
          "throughputRPS": "2.488", "latencySeconds": "26.021", "nodes": 5, "executable": False,
          "pipelines": [
              {"domain": "hyperstack/montreal-canada-2", "throughputRPS": "1.274",
@@ -867,39 +888,36 @@ SERVING_STATUS = {
                    "layers": 35, "tp": 2, "pricePerHour": "1.7600"},
                   {"instanceType": "massedcompute_A100_sxm4_80G_DGX", "zone": "kansascity-usa-1",
                    "layers": 29, "tp": 1, "pricePerHour": "1.3800"}]}]},
-        {"rank": 3, "priceBasis": "on_demand", "costPerHour": "10.8000",
-         "throughputRPS": "12.283", "latencySeconds": "2.042", "nodes": 1, "executable": True,
-         "pipelines": [
-             {"domain": "excesssupply/omaha-usa-2", "throughputRPS": "12.283",
-              "costPerHour": "10.8000", "stages": [
-                  {"instanceType": "excesssupply_A100_sxm4_80Gx8_2", "zone": "omaha-usa-2",
-                   "layers": 80, "tp": 8, "pricePerHour": "10.8000"}]}]},
     ],
-    "servingPlanChosen": {"rank": 3, "instanceType": "A100_sxm4_80Gx8_2",
+    "servingPlanChosen": {"rank": 1, "instanceType": "A100_sxm4_80Gx8_2",
                           "cloud": "excesssupply", "region": "omaha-usa-2",
                           "costPerHour": "10.8000", "throughputRPS": "12.283",
-                          "latencySeconds": "2.042", "attempt": 2},
+                          "latencySeconds": "2.042", "score": "1.137", "attempt": 1},
 }
 
 
 def test_the_view_carries_the_ranked_plans_and_the_one_rented():
     view = JobView.from_hyperunjob({"metadata": {"name": "hyperun-x"}, "spec": {},
                                     "status": SERVING_STATUS})
-    assert [p.rank for p in view.serving_plans] == [1, 3]
-    first = view.serving_plans[0]
-    assert (first.cost_per_hour, first.throughput_rps, first.latency_seconds) == \
+    assert [p.rank for p in view.serving_plans] == [1, 2]
+    # The score is the operator's string, the number the ranks are sorted by.
+    assert [p.score for p in view.serving_plans] == ["1.137", "0.308"]
+    second = view.serving_plans[1]
+    assert (second.cost_per_hour, second.throughput_rps, second.latency_seconds) == \
         ("8.0700", "2.488", "26.021")
-    assert first.nodes == 5 and first.executable is False and first.price_basis == "on_demand"
-    assert [q.domain for q in first.pipelines] == ["hyperstack/montreal-canada-2",
-                                                   "massedcompute/kansascity-usa-1"]
-    stage = first.pipelines[0].stages[0]
+    assert second.nodes == 5 and second.executable is False and second.price_basis == "on_demand"
+    assert [q.domain for q in second.pipelines] == ["hyperstack/montreal-canada-2",
+                                                    "massedcompute/kansascity-usa-1"]
+    stage = second.pipelines[0].stages[0]
     assert (stage.instance_type, stage.zone, stage.layers, stage.tp, stage.price_per_hour) == \
         ("hyperstack_A100_80Gx2", "montreal-canada-2", 53, 2, "2.7000")
     chosen = view.serving_plan_chosen
-    assert (chosen.rank, chosen.instance_type, chosen.cloud, chosen.region, chosen.attempt) == \
-        (3, "A100_sxm4_80Gx8_2", "excesssupply", "omaha-usa-2", 2)
+    assert (chosen.rank, chosen.instance_type, chosen.cloud, chosen.region, chosen.attempt,
+            chosen.score) == (1, "A100_sxm4_80Gx8_2", "excesssupply", "omaha-usa-2", 1, "1.137")
+    # The catalog label crosses verbatim: it is the operator's sentence, with its fetch time.
+    assert view.serving_catalog.startswith("Shadeform catalog fetched 2026-10-20T02:39:32Z")
     # Strings as the operator wrote them, never floats: 8.07 must not print as 8.069999...
-    assert view.model_dump()["serving_plans"][0]["cost_per_hour"] == "8.0700"
+    assert view.model_dump()["serving_plans"][1]["cost_per_hour"] == "8.0700"
 
 
 def test_an_operator_that_writes_no_latency_or_executable_reads_as_unknown():
@@ -916,6 +934,22 @@ def test_an_operator_that_writes_no_latency_or_executable_reads_as_unknown():
     assert [(p.latency_seconds, p.executable) for p in view.serving_plans] == \
         [(None, None), (None, None)]
     assert view.serving_plan_chosen is None
+
+
+def test_an_operator_older_than_the_score_reads_as_unknown_not_zero():
+    """Before 2026-10-20 PACSrun wrote no score and no catalog. None and "" say "not written";
+    a 0 score would read as a plan that serves nothing per dollar."""
+    import copy
+
+    status = copy.deepcopy(SERVING_STATUS)
+    for plan in status["servingPlans"]:
+        del plan["score"]
+    del status["servingPlanChosen"]["score"], status["servingCatalog"]
+    view = JobView.from_hyperunjob({"metadata": {"name": "hyperun-x"}, "spec": {},
+                                    "status": status})
+    assert [p.score for p in view.serving_plans] == [None, None]
+    assert view.serving_plan_chosen.score is None
+    assert view.serving_catalog == ""
 
 
 def test_a_job_with_no_plans_has_an_empty_list_and_no_choice():

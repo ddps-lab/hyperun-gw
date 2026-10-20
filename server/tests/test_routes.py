@@ -2680,7 +2680,7 @@ def test_the_old_a100_name_is_priced_as_the_a100_40gb_it_is_submitted_as(client)
 # ---------------------------------------------------------------- HYPERUN-SERVING-PLAN
 
 SERVING_ASK = {"model": "llama-3.1-8b", "avg_input_tokens": 763, "avg_output_tokens": 232,
-               "target_rps": 2.0, "hourly_budget": 20.8333}
+               "hourly_budget": 20.8333}
 
 
 def test_a_serving_plan_needs_no_capacity_type_and_reaches_the_object(client, cluster):
@@ -2691,7 +2691,7 @@ def test_a_serving_plan_needs_no_capacity_type_and_reaches_the_object(client, cl
     response = as_alice(client, "POST", "/v1/jobs", json=body)
     assert response.status_code == 201, response.text
     placement = cluster.created[0][1]["spec"]["placement"]
-    assert placement["servingPlan"]["targetRPS"] == "2.0"
+    assert "targetRPS" not in placement["servingPlan"]
     assert placement["servingPlan"]["hourlyBudget"] == "20.8333"
     assert (placement["capacityType"], placement["regions"], placement["mode"]) == \
         ("on-demand", ["shadeform"], "compare")
@@ -2699,11 +2699,25 @@ def test_a_serving_plan_needs_no_capacity_type_and_reaches_the_object(client, cl
 
 def test_a_bad_serving_plan_is_refused_with_validates_words_and_nothing_is_created(
         client, cluster):
-    body = submit_body(serving_plan={**SERVING_ASK, "target_rps": 0, "model": "gpt-4"})
+    body = submit_body(serving_plan={**SERVING_ASK, "hourly_budget": 0, "model": "gpt-4"})
     response = as_alice(client, "POST", "/v1/jobs", json=body)
     assert response.status_code == 400
     detail = response.json()["detail"]
-    assert "[serving-plan-model]" in detail and "[serving-plan-target-rps]" in detail
+    assert "[serving-plan-model]" in detail and "[serving-plan-hourly-budget]" in detail
+    assert cluster.created == []
+
+
+def test_a_serving_plan_that_still_sends_a_target_rate_is_refused_not_run(client, cluster):
+    """HYPERUN-SERVING-PLAN. Refused, not ignored: the plan PACSrun rents now is the best score
+    under the budget, which may serve fewer requests per second than the number sent, and a
+    machine is rented the moment the job exists. /v1/validate says the same thing first."""
+    body = submit_body(serving_plan={**SERVING_ASK, "target_rps": 2.0})
+    answer = as_alice(client, "POST", "/v1/validate", json=body).json()
+    assert answer["ok"] is False
+    assert "serving-plan-target-rps-removed" in {f["code"] for f in answer["findings"]}
+    response = as_alice(client, "POST", "/v1/jobs", json=body)
+    assert response.status_code == 400
+    assert "[serving-plan-target-rps-removed]" in response.json()["detail"]
     assert cluster.created == []
 
 
@@ -2722,8 +2736,7 @@ def test_validate_answers_a_missing_value_as_a_finding_not_a_422(client):
     answer = response.json()
     assert answer["ok"] is False
     codes = {f["code"] for f in answer["findings"] if f["level"] == "error"}
-    assert codes == {"serving-plan-tokens", "serving-plan-target-rps",
-                     "serving-plan-hourly-budget"}
+    assert codes == {"serving-plan-tokens", "serving-plan-hourly-budget"}
 
 
 def test_the_estimate_says_its_figures_do_not_price_a_serving_plan(client):
@@ -2735,8 +2748,11 @@ def test_the_estimate_says_its_figures_do_not_price_a_serving_plan(client):
 
 
 def test_the_schema_offers_the_serving_plan(client):
-    properties = client.get("/v1/schema").json()["properties"]
-    assert "serving_plan" in properties
+    schema = client.get("/v1/schema").json()
+    assert "serving_plan" in schema["properties"]
+    # The target rate is gone from the published shape, so an agent reading it cannot send one.
+    plan_fields = schema["$defs"]["ServingPlanRequest"]["properties"]
+    assert "target_rps" not in plan_fields and "hourly_budget" in plan_fields
 
 
 def _serving_job(cluster):
@@ -2748,8 +2764,10 @@ def _serving_job(cluster):
         "spec": {"placement": {"capacityType": "on-demand", "regions": ["shadeform"]}},
         "status": {
             "phase": "Running",
+            "servingCatalog": "Shadeform catalog fetched 2026-10-20T02:39:32Z (live ConfigMap "
+                              "hyperun-shadeform-catalog)",
             "servingPlans": [{
-                "rank": 1, "priceBasis": "on_demand", "costPerHour": "1.3500",
+                "rank": 1, "score": "12.558", "priceBasis": "on_demand", "costPerHour": "1.3500",
                 "throughputRPS": "16.953", "latencySeconds": "1.760", "nodes": 1,
                 "executable": True,
                 "pipelines": [{"domain": "hyperstack/montreal-canada-2",
@@ -2761,7 +2779,8 @@ def _serving_job(cluster):
             "servingPlanChosen": {"rank": 1, "instanceType": "A100_80G",
                                   "cloud": "hyperstack", "region": "montreal-canada-2",
                                   "costPerHour": "1.3500", "throughputRPS": "16.953",
-                                  "latencySeconds": "1.760", "attempt": 1},
+                                  "latencySeconds": "1.760", "score": "12.558",
+                                  "attempt": 1},
         },
     }
 
@@ -2775,6 +2794,10 @@ def test_the_job_carries_its_plans_and_the_one_rented(client, cluster):
     assert view["serving_plan_chosen"]["instance_type"] == "A100_80G"
     assert view["serving_plan_chosen"]["cloud"] == "hyperstack"
     assert view["serving_plan_chosen"]["attempt"] == 1
+    # The score the ranks were sorted by, and the catalog they were ranked on.
+    assert view["serving_plans"][0]["score"] == "12.558"
+    assert view["serving_plan_chosen"]["score"] == "12.558"
+    assert view["serving_catalog"].endswith("(live ConfigMap hyperun-shadeform-catalog)")
 
 
 def test_the_job_list_leaves_the_plans_out_and_keeps_the_choice(client, cluster):

@@ -686,9 +686,10 @@ def test_validate_refuses_a_pin_it_cannot_place_and_names_what_it_did_not_check(
 
 
 def serving(**overrides):
-    """ShuntServe's README workload at the hourly budget the planner commit used."""
+    """ShuntServe's README workload at the hourly budget the planner commit used. No target
+    rate: PACSrun removed it on 2026-10-19."""
     fields = {"model": "llama-3.1-8b", "avg_input_tokens": 763, "avg_output_tokens": 232,
-              "target_rps": 2.0, "hourly_budget": 20.8333}
+              "hourly_budget": 20.8333}
     fields.update(overrides)
     return v.models.ServingPlanRequest(**fields)
 
@@ -727,8 +728,7 @@ def test_a_good_plan_without_compare_is_told_what_it_will_rent_and_the_ceiling()
     ({"model": None}, "serving-plan-model", "missing"),
     ({"avg_input_tokens": 0}, "serving-plan-tokens", "avg_input_tokens is 0"),
     ({"avg_output_tokens": None}, "serving-plan-tokens", "avg_output_tokens is missing"),
-    ({"target_rps": -1.0}, "serving-plan-target-rps", "target_rps is -1.0"),
-    ({"target_rps": float("inf")}, "serving-plan-target-rps", "target_rps is inf"),
+    ({"hourly_budget": float("inf")}, "serving-plan-hourly-budget", "hourly_budget is inf"),
     ({"hourly_budget": None}, "serving-plan-hourly-budget", "hourly_budget is missing"),
     ({"hourly_budget": 0.0}, "serving-plan-hourly-budget", "hourly_budget is 0.0"),
 ])
@@ -738,6 +738,27 @@ def test_each_bad_value_is_an_error_that_names_the_field_and_the_value(bad, code
     assert [f.code for f in errors] == [code]
     assert named in errors[0].message
     assert errors[0].fix
+
+
+@pytest.mark.parametrize("spelling", ["target_rps", "targetRPS"])
+def test_a_target_rate_is_refused_by_name_not_dropped(spelling):
+    """HYPERUN-SERVING-PLAN. PACSrun ranks by score under the budget since 2026-10-19 and has no
+    target rate. A body that still sends one would otherwise rent a plan chosen by a rule its
+    author did not ask for, so it is an error naming the field, with what to read instead."""
+    findings = check_plan(serving(**{spelling: 2.0}))
+    errors = [f for f in findings if f.level == v.ERROR]
+    assert [f.code for f in errors] == ["serving-plan-target-rps-removed"]
+    assert f"serving_plan.{spelling} is 2.0" in errors[0].message
+    assert "throughput_rps" in errors[0].fix and f"Remove {spelling}" in errors[0].fix
+
+
+def test_the_renting_note_says_score_and_never_cheapest():
+    """Rank 1 is the most requests per second per dollar-hour, which can be the dearer plan per
+    hour (PACSrun's own 2026-10-19 snapshot: $10.80/h beat $8.07/h). "cheapest" was wrong."""
+    for mode in (None, "compare"):
+        text = " ".join(f.message for f in check_plan(serving(), mode=mode))
+        assert "cheapest" not in text
+        assert "score" in text
 
 
 def test_an_unknown_model_is_answered_with_the_two_that_exist():
@@ -782,13 +803,13 @@ def test_the_aggregate_says_what_it_cannot_check_and_drops_the_vendor_ranking_no
     assert "nothing-to-compare" not in codes(result)
     assert "compare-buys-nothing" not in codes(result)
     assert "serving-plan-compare" in codes(result)
-    assert any("target rate within your hourly budget" in line for line in result.not_checked)
+    assert any("fast enough for your traffic" in line for line in result.not_checked)
 
 
 def test_a_bad_serving_plan_makes_the_aggregate_not_ok():
     result = v.validate(env={}, script=None, cap=None, vram_gb=None, job_estimate=KNOWN,
                         capacity_type="on-demand", regions=["shadeform"],
-                        serving_plan=serving(target_rps=None))
+                        serving_plan=serving(hourly_budget=None))
     assert not result.ok
 
 

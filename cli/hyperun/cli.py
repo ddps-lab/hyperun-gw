@@ -181,19 +181,18 @@ def job_arguments() -> argparse.ArgumentParser:
     # for the reason --vendor's are not: the server owns the list and names the good ones.
     shared.add_argument(
         "--serving-model", metavar="NAME",
-        help="ask the ShuntServe planner which Shadeform machines serve this model at "
-        "--target-rps for the least money per hour, instead of naming a GPU: llama-3.1-8b or "
-        "llama-3.1-70b. The job goes out on-demand on shadeform, so leave --capacity-type, "
+        help="ask the ShuntServe planner which Shadeform machines serve this model with the "
+        "most requests per second per dollar-hour within --hourly-budget, instead of naming a "
+        "GPU: llama-3.1-8b or llama-3.1-70b. There is no target request rate; each plan's rate "
+        "is its estimate. The job goes out on-demand on shadeform, so leave --capacity-type, "
         "--vendor, --region and --gpu-* out. With --placement-mode compare the plans are only "
-        "ranked; otherwise the cheapest plan that runs on one machine is rented, and "
+        "ranked; otherwise the highest-score plan that runs on one machine is rented, and "
         "--parallelism must stay 1.",
     )
     shared.add_argument("--avg-input-tokens", type=int, metavar="N",
                         help="serving plan: average prompt length of the traffic, in tokens")
     shared.add_argument("--avg-output-tokens", type=int, metavar="N",
                         help="serving plan: average answer length of the traffic, in tokens")
-    shared.add_argument("--target-rps", type=float, metavar="RPS",
-                        help="serving plan: the request rate a plan must reach, requests/second")
     shared.add_argument(
         "--hourly-budget", type=float, metavar="USD",
         help="serving plan: the most a plan may cost, US dollars PER HOUR for all its machines "
@@ -621,8 +620,7 @@ def build_submit_body(args: argparse.Namespace) -> dict[str, Any]:
     serving = dict(body.get("serving_plan") or {})
     for flag, field in (
         ("serving_model", "model"), ("avg_input_tokens", "avg_input_tokens"),
-        ("avg_output_tokens", "avg_output_tokens"), ("target_rps", "target_rps"),
-        ("hourly_budget", "hourly_budget"),
+        ("avg_output_tokens", "avg_output_tokens"), ("hourly_budget", "hourly_budget"),
     ):
         value = getattr(args, flag, None)
         if value is not None:
@@ -721,7 +719,7 @@ def require_known_fields(client: Any, body: dict[str, Any]) -> None:
     missing = [name for name in used if name not in known]
     if missing:
         flags = {"instance_type": "--instance-type",
-                 "serving_plan": "the serving plan (--serving-model and the four after it)"}
+                 "serving_plan": "the serving plan (--serving-model and the three after it)"}
         raise SystemExit(
             f"this server does not know {', '.join(missing)}. It would drop the field "
             f"and still run the job, on whatever machine its solver picks. Ask whoever "
@@ -1209,16 +1207,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     # older server sends neither field and nothing is printed.
     chosen = view.get("serving_plan_chosen")
     if chosen:
+        score = f", score {chosen['score']}" if chosen.get("score") else ""
         print(f"  serving    plan {chosen.get('rank')}: {chosen.get('instance_type')} "
               f"({chosen.get('cloud')} / {chosen.get('region')}), "
               f"${chosen.get('cost_per_hour')}/h, estimated {chosen.get('throughput_rps')} "
-              f"req/s, attempt {chosen.get('attempt')}")
+              f"req/s{score}, attempt {chosen.get('attempt')}")
     plans = view.get("serving_plans") or []
     if plans:
-        cheapest = plans[0]
-        print(f"  plans      {len(plans)} ranked; the cheapest is ${cheapest.get('cost_per_hour')}"
-              f"/h for {cheapest.get('throughput_rps')} req/s on {cheapest.get('nodes')} "
-              f"machine(s). --json lists them all")
+        # ★ RANK 1 IS THE BEST SCORE, NOT THE CHEAPEST. PACSrun ranks by requests per second
+        # per dollar-hour since 2026-10-19, and in its own snapshot that day the $10.80/h plan
+        # outranked the $8.07/h one. This line said "the cheapest is" until 2026-10-20.
+        best = plans[0]
+        score = f" (score {best['score']} req/s per $/h)" if best.get("score") else ""
+        print(f"  plans      {len(plans)} ranked; rank 1 is ${best.get('cost_per_hour')}"
+              f"/h for {best.get('throughput_rps')} req/s on {best.get('nodes')} "
+              f"machine(s){score}. --json lists them all")
+    if view.get("serving_catalog"):
+        print(f"  catalog    {view['serving_catalog']}")
     if view.get("recovery_count"):
         # Not a failure: the job was restarted. It used to say "the machine was
         # reclaimed" every time, which was wrong for job-a9ea30b8ba7a -- its three

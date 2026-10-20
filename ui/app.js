@@ -1480,9 +1480,11 @@ function drawCompare(job) {
    END-TO-END FLOW of what reaches this panel:
      1. The job was submitted with `serving_plan` (readForm), which the gateway wrote as
         PACSrun's spec.placement.servingPlan with regions [shadeform].
-     2. PACSrun's planner ranked up to 50 plans, cheapest per hour first, and wrote them to
-        status.servingPlans; outside compare mode it rented the cheapest plan that runs on one
-        machine and wrote that to status.servingPlanChosen, with the attempt it is on.
+     2. PACSrun's planner ranked up to 50 plans by score, estimated requests per second per
+        dollar-hour, every plan within the hourly budget, and wrote them to status.servingPlans
+        with the catalog it read in status.servingCatalog; outside compare mode it rented the
+        highest-score plan that runs on one machine and wrote that to status.servingPlanChosen,
+        with the attempt it is on.
      3. GET /v1/jobs/{id} returns both as `serving_plans` and `serving_plan_chosen`, money and
         rates as the decimal strings PACSrun wrote. This panel prints them as they are.
 
@@ -1490,7 +1492,12 @@ function drawCompare(job) {
    whose layers are split in order across machines of one domain; rank 1 of the 2026-10-19
    snapshot is two pipelines on five machines. The plan's own numbers (rank, req/s, $/h,
    latency, executable) span its pipeline rows, and each pipeline row names its domain and its
-   machines with the layers and TP each one holds. */
+   machines with the layers and TP each one holds.
+
+   ★ RANK 1 IS THE BEST SCORE, NOT THE CHEAPEST, and the summary said "cheapest" until
+   2026-10-20. In PACSrun's own 2026-10-19 snapshot one 8-GPU machine at $10.80/h scores 1.137
+   req/s per $/h and outranks five machines at $8.07/h scoring 0.308. The Score column is the
+   number the ranks are sorted by, so the reader can see why the order is what it is. */
 function servingPlanHtml(job, asked) {
   const plans = job.serving_plans || [];
   const chosen = job.serving_plan_chosen || null;
@@ -1501,7 +1508,12 @@ function servingPlanHtml(job, asked) {
   if (asked) {
     parts.push(`<p class="dim small">Asked for ${esc(asked.model)}, ` +
       `${esc(asked.avgInputTokens)} tokens in and ${esc(asked.avgOutputTokens)} out, ` +
-      `${esc(asked.targetRPS)} req/s within $${esc(asked.hourlyBudget)}/h.</p>`);
+      `the most requests per second per dollar within $${esc(asked.hourlyBudget)}/h.</p>`);
+  }
+  // The operator's own sentence, with the fetch time: the cluster refreshes the catalog every 10
+  // minutes, so two jobs with the same ask can get different lists and this says which one.
+  if (job.serving_catalog) {
+    parts.push(`<p class="dim tiny">Ranked on: ${esc(job.serving_catalog)}</p>`);
   }
   if (chosen) {
     parts.push(`<div class="facts">` + [
@@ -1511,6 +1523,7 @@ function servingPlanHtml(job, asked) {
       fact("Price", `$${chosen.cost_per_hour}/h`),
       fact("Estimated", `${chosen.throughput_rps} req/s, ` +
         (chosen.latency_seconds != null ? `${chosen.latency_seconds} s` : "latency -")),
+      fact("Score", chosen.score != null ? `${chosen.score} req/s per $/h` : "-"),
     ].join("") + `</div>`);
   }
   if (!plans.length) {
@@ -1540,6 +1553,7 @@ function servingPlanHtml(job, asked) {
         (isChosen ? `<div class="tiny"><b>chosen</b>, attempt ${esc(chosen.attempt)}</div>` : "") +
         `</td>`;
       const tail = i > 0 ? "" :
+        `<td class="num span-top"${span}>${esc(p.score ?? "-")}</td>` +
         `<td class="num span-top"${span}>${esc(p.throughput_rps ?? "-")}</td>` +
         `<td class="num span-top"${span}>${p.cost_per_hour != null ? "$" + esc(p.cost_per_hour) : "-"}</td>` +
         `<td class="num span-top"${span}>${p.latency_seconds != null ? esc(p.latency_seconds) + " s" : "-"}</td>` +
@@ -1550,11 +1564,16 @@ function servingPlanHtml(job, asked) {
   }).join("");
 
   parts.push(`<div class="scroll"><table><thead><tr>` +
-    `<th>Rank</th><th>Domain</th><th>VM(s)</th><th>req/s</th><th>$/h</th><th>Latency</th>` +
+    `<th>Rank</th><th>Domain</th><th>VM(s)</th>` +
+    `<th title="Estimated requests per second per dollar-hour: the number the ranks are sorted by">Score</th>` +
+    `<th>req/s</th><th>$/h</th><th>Latency</th>` +
     `<th title="Runs on one machine, which is the only kind the operator can rent today">Executable</th>` +
     `</tr></thead><tbody>${rows}</tbody></table></div>`);
-  const summary = `${plans.length} plan${plans.length === 1 ? "" : "s"}, cheapest ` +
-    `$${plans[0].cost_per_hour}/h` +
+  // The lowest rank, not plans[0]: the server sends them in rank order today, and a summary that
+  // named the wrong plan's score because of an order change would be wrong without looking it.
+  const best = plans.reduce((a, b) => (b.rank < a.rank ? b : a));
+  const summary = `${plans.length} plan${plans.length === 1 ? "" : "s"}, rank ${best.rank} ` +
+    (best.score != null ? `scores ${best.score} at ` : "is ") + `$${best.cost_per_hour}/h` +
     (chosen ? `, rented rank ${chosen.rank}` : job.placement_mode === "compare" ? ", nothing rented" : "");
   return { summary, html: parts.join("") };
 }
@@ -1596,7 +1615,6 @@ function servingCheckHtml(answer) {
   const c = answer.check;
   const cmp = c.comparison || {};
   const plan = c.plan || {};
-  const target = (c.runs || {}).target || null;
   const shown = (x, unit) => (x === null || x === undefined) ? null : `${x}${unit}`;
   const estimate = (x, unit) => shown(x, unit) ?? "-";
   const measured = (x, unit) => shown(x, unit) ?? "not measured";
@@ -1616,16 +1634,13 @@ function servingCheckHtml(answer) {
     fact("vLLM", (c.software && c.software.vllm_version) || "-"),
   ].join("") + `</div>`);
 
-  const sustained = cmp.target_rate_sustained === true ? "held"
-    : cmp.target_rate_sustained === false ? "not held" : "not measured";
+  // No "Target rate" row since 2026-10-20: a serving plan has no target request rate (PACSrun
+  // removed targetRPS on 2026-10-19), so the check compares the plan's two estimates only.
   const rows = [
     ["Throughput at full load", estimate(cmp.max_rps_planned, " req/s"),
       measured(cmp.max_rps_measured, " req/s"), estimate(cmp.max_rps_ratio, "")],
     ["Latency of one request alone", estimate(cmp.single_latency_s_planned, " s"),
       measured(cmp.single_latency_s_measured, " s"), estimate(cmp.single_latency_ratio, "")],
-    ["Target rate", estimate((c.workload || {}).target_rate_rps, " req/s"),
-      (target && target.request_throughput_rps != null
-        ? `${target.request_throughput_rps} req/s, ${sustained}` : sustained), "-"],
   ];
   parts.push(`<div class="scroll"><table><thead><tr>` +
     `<th></th><th>Planner estimate</th><th>Measured</th><th>Measured / estimate</th>` +
@@ -1981,7 +1996,6 @@ function readForm() {
       model: $("f-serve-model").value,
       avg_input_tokens: num("f-serve-in"),
       avg_output_tokens: num("f-serve-out"),
-      target_rps: dec("f-serve-rps"),
       hourly_budget: dec("f-serve-budget"),
     };
   }
@@ -2337,7 +2351,7 @@ $("s1-reset").onclick = () => {
   // it uncleared.
   ["f-name", "f-image", "f-command", "f-env",
    "f-pairs", "f-epochs", "f-rowtokens", "f-cap", "f-batch",
-   "f-serve-model", "f-serve-in", "f-serve-out", "f-serve-rps", "f-serve-budget",
+   "f-serve-model", "f-serve-in", "f-serve-out", "f-serve-budget",
   ].forEach((id) => { $(id).value = ""; });
   $("f-command-note").innerHTML = "";
   $("f-gpucount").value = 1;
@@ -2402,8 +2416,8 @@ function vendorRules() {
    all back.
 
    THE MODE IS LEFT ALONE, because it decides whether money is spent and that is the person's
-   call: compare ranks the plans and rents nothing, any other mode rents the cheapest plan that
-   runs on one machine. The note says which, and this runs on every mode change to keep it true.
+   call: compare ranks the plans and rents nothing, any other mode rents the highest-score plan
+   that runs on one machine. The note says which, and this runs on every mode change to keep it true.
 
    It calls vendorRules, so it is also the mode select's handler. */
 function servingRules() {
@@ -2430,7 +2444,7 @@ function servingRules() {
   if (summary) {
     summary.textContent = on
       ? `${$("f-serve-model").value}, sent with this job`
-      : "optional: which Shadeform machines serve a model at your request rate";
+      : "optional: which Shadeform machines serve a model best per dollar";
   }
   if (!on) {
     $("f-serve-note").innerHTML = "";
@@ -2441,8 +2455,9 @@ function servingRules() {
     "Capacity is on-demand, parallelism is 1 and the planner picks Shadeform machines, so " +
     "vendors, regions and GPU are set aside. " + (compare
       ? "Placement is compare: the planner ranks up to 50 plans and nothing is rented."
-      : `Placement is ${$("f-mode").value || "ordered"}: the operator rents the cheapest plan ` +
-        "that runs on one machine and runs this image there, billed by the hour, and tries the " +
+      : `Placement is ${$("f-mode").value || "ordered"}: the operator rents the highest-score ` +
+        "plan (most requests per second per dollar within your hourly budget) that runs on one " +
+        "machine and runs this image there, billed by the hour, and tries the " +
         "next one-machine plan if that rental fails. Choose compare under Placement to see the " +
         "plans first."));
 }
@@ -2871,13 +2886,14 @@ $("d-again").onclick = () => {
   $("f-env").value = (sp.env || [])
     .map((x) => x.fromSecret ? `${x.name}=` : `${x.name}=${x.value ?? ""}`).join("\n");
 
-  // HYPERUN-SERVING-PLAN. The operator's camelCase block back into the five boxes, then the
-  // same rules a model chosen by hand applies. A job without one clears them.
+  // HYPERUN-SERVING-PLAN. The operator's camelCase block back into the four boxes, then the
+  // same rules a model chosen by hand applies. A job without one clears them. A job submitted
+  // before 2026-10-20 may carry targetRPS; it is not carried across, because the server now
+  // refuses it (serving-plan-target-rps-removed).
   const serving = pl.servingPlan || {};
   $("f-serve-model").value = serving.model || "";
   $("f-serve-in").value = serving.avgInputTokens ?? "";
   $("f-serve-out").value = serving.avgOutputTokens ?? "";
-  $("f-serve-rps").value = serving.targetRPS ?? "";
   $("f-serve-budget").value = serving.hourlyBudget ?? "";
   servingRules();
   step(1);
