@@ -293,6 +293,8 @@ async function route() {
     arg.split("@")[0] === termUI.jobKey;
   if (termUI.open && !goingToThisJob) closeTerminal("");
   if (!goingToThisJob) termUI.jobKey = null;
+  // HYPERUN-SERVING-KEY. A serving's API key shown on its page does not outlive the page.
+  hideServingKey();
 
   try {
     if (head === "jobs" && arg) {
@@ -305,6 +307,8 @@ async function route() {
     }
     else if (head === "jobs")   { show("jobs");   drawJobs(); }
     else if (head === "submit") { show("submit"); drawImages(); drawRegionChoices(); }
+    // HYPERUN-SERVING. #/servings is the list and the form, #/servings/<name> one serving.
+    else if (head === "servings") { show("servings"); drawServings(arg || ""); }
     else if (head === "scripts") { show("scripts"); drawScripts(); }
     else if (head === "team")   { show("team");   drawTeam(); }
     else if (head === "vendors") { show("vendors"); drawVendors(); }
@@ -1674,6 +1678,359 @@ async function drawServingCheck(jobId) {
   $("d-servecheck").innerHTML = view.html;
   $("d-servecheck-panel").hidden = false;
 }
+
+/* ------------------------------------------------------------ 3c. Servings */
+
+/* HYPERUN-SERVING. The Servings screen: a model served behind an OpenAI-compatible endpoint.
+
+   END-TO-END FLOW:
+     1. #/servings: drawServings("") lists GET /v1/servings every 15 s (servingRowsHtml) and
+        fills the New serving form once (drawServingForm): the presets and the recommendation
+        from GET /v1/serving-models, the token choices from GET /v1/secrets `own` -- the values
+        this namespace registered, which are the only ones the server may read for a lookup.
+     2. "Look up this model" sends POST /v1/model-config and shows the numbers or the refusal
+        (modelConfigHtml). It is a PREVIEW: Create sends the id again and the server reads
+        config.json itself, so what is created never rests on a lookup made for another id.
+     3. Create sends readServingForm() to POST /v1/servings and opens the new serving's page.
+     4. #/servings/<name>: drawServing polls GET /v1/servings/<name> every 10 s and draws the
+        facts, the endpoint URL (this page's server + endpoint.path), the chosen plan's machines
+        and the ranked plans (servingFactsHtml, servingChosenHtml, servingPlansHtml).
+     5. "Show API key" reads GET /v1/servings/<name>/api-key ONCE per click and shows it until
+        Hide or any route change (hideServingKey, called from route()). It is never stored.
+     6. "Delete serving" asks, sends DELETE, and goes back to the list.
+
+   NOTHING IS DECIDED HERE: which models are allowed, whether a budget is valid and which plan
+   is rented are the server's and the operator's. The one number computed here is the cost
+   ceiling shown before Create (servingCostHtml), budget x 24, because the person must see what
+   a day costs before the money is committed, and no server has been asked anything yet. */
+
+let servingFormDrawn = false;
+
+/* The New serving form as the body POST /v1/servings takes. Empty token boxes are LEFT OUT so
+   the server's defaults (763 and 232, ShuntServe's own workload) apply; an empty budget goes as
+   null so the server names it as missing rather than this screen guessing one. */
+function readServingForm() {
+  const body = { name: $("sv-name").value.trim(), model: {} };
+  const source = $("sv-source").value;
+  if (source === "preset") body.model.preset = $("sv-preset").value;
+  if (source === "hf") body.model.name = $("sv-hf").value.trim();
+  if (source === "url") body.model.config_url = $("sv-url").value.trim();
+  const revision = $("sv-revision").value.trim();
+  if (source === "hf" && revision) body.model.revision = revision;
+  const whole = (id) => {
+    const v = parseInt($(id).value, 10);
+    return Number.isFinite(v) ? v : null;
+  };
+  const dec = (id) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) ? v : null;
+  };
+  if (whole("sv-in") !== null) body.avg_input_tokens = whole("sv-in");
+  if (whole("sv-out") !== null) body.avg_output_tokens = whole("sv-out");
+  body.hourly_budget = dec("sv-budget");
+  if (dec("sv-max") !== null) body.max_spend_usd = dec("sv-max");
+  if ($("sv-image").value.trim()) body.image = $("sv-image").value.trim();
+  if ($("sv-token").value) body.hf_token_secret = $("sv-token").value;
+  return body;
+}
+
+/* What the serving can cost, before it is created. Same arithmetic as the server's `billing`
+   sentence (servings.billing_sentence): the hourly ceiling and 24 of them. */
+function servingCostHtml(budget, max) {
+  if (!(budget > 0)) return "";
+  return note("info",
+    `Once a plan is rented it bills at most $${budget.toFixed(2)} an hour, ` +
+    `$${(budget * 24).toFixed(2)} a day, until you delete the serving` +
+    (max > 0 ? ` or $${max.toFixed(2)} in total is spent.`
+             : ". There is no total cap unless you set one."));
+}
+
+/* Which model boxes the chosen source needs. A preset carries its own numbers, so it has
+   nothing to look up. */
+function servingSourceRules() {
+  const source = $("sv-source").value;
+  $("sv-preset-box").hidden = source !== "preset";
+  $("sv-hf-box").hidden = source !== "hf";
+  $("sv-url-box").hidden = source !== "url";
+  $("sv-rev-box").hidden = source !== "hf";
+  $("sv-lookup").hidden = source === "preset";
+  $("sv-model-note").innerHTML = "";
+}
+
+/* POST /v1/model-config's answer: the family, the eight numbers, and what was derived. */
+function modelConfigHtml(answer) {
+  const c = answer.config || {};
+  const rows = [
+    ["Architecture", c.architecture], ["Layers", c.num_layers], ["Hidden size", c.hidden_size],
+    ["Attention heads", c.num_attention_heads], ["KV heads", c.num_key_value_heads],
+    ["Head size", c.head_dim], ["MLP width", c.intermediate_size],
+    ["Vocabulary", c.vocab_size], ["dtype", c.dtype || "-"],
+  ];
+  return note("info", `${answer.name || answer.config_source}: ${answer.family}. ` +
+                      "The planner can rank plans for it.") +
+    `<div class="facts">` + rows.map(([k, v]) => fact(k, v ?? "-")).join("") + `</div>` +
+    (answer.notes || []).map((n) => `<p class="dim tiny">${esc(n)}</p>`).join("");
+}
+
+/* GET /v1/servings rows. "Now" is the rented plan's $/h, the number the bill grows by. */
+function servingRowsHtml(servings) {
+  if (!servings.length) return empty("No servings yet. The form below starts one.");
+  const rows = servings.map((s) => {
+    const chosen = s.serving_plan_chosen || {};
+    const ready = Boolean((s.endpoint || {}).ready);
+    return `<tr class="click" data-serving="${esc(s.name)}">` +
+      `<td><b>${esc(s.name)}</b></td><td>${badge(s.phase || "Accepted")}</td>` +
+      `<td>${ready ? "ready" : "not ready"}</td>` +
+      `<td class="num">${chosen.cost_per_hour != null ? "$" + esc(chosen.cost_per_hour) + "/h" : "-"}</td>` +
+      `<td class="mono small">${esc((s.model || {}).name || "")}</td>` +
+      `<td class="num">${esc(when(s.created_at))}</td></tr>`;
+  }).join("");
+  return `<div class="scroll"><table><thead><tr><th>Name</th><th>Phase</th><th>Endpoint</th>` +
+    `<th>Now</th><th>Model</th><th>Created</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function servingFactsHtml(view) {
+  const model = view.model || {};
+  return [
+    fact("Model", model.name || "-"),
+    fact("Numbers from", model.preset ? `preset ${model.preset}` : (model.config_source || "-")),
+    fact("Traffic", `${view.avg_input_tokens ?? "-"} tokens in, ${view.avg_output_tokens ?? "-"} out`),
+    fact("Hourly budget", view.hourly_budget != null ? `$${view.hourly_budget}/h` : "-"),
+    fact("Total cap", view.max_spend_usd != null ? `$${view.max_spend_usd}` : "none"),
+    fact("Created", when(view.created_at)),
+  ].join("");
+}
+
+/* The plan the operator rents, one row per machine. Rank 0 is the pipeline's first stage, the
+   one whose vLLM the endpoint reaches (status.endpoint.upstream, contract of 2026-10-20). */
+function servingChosenHtml(view) {
+  const c = view.serving_plan_chosen;
+  if (!c) {
+    return { summary: "none yet",
+             html: `<p class="dim">The operator has not chosen a plan yet.</p>` };
+  }
+  const stages = (c.stages || []).map((s, i) =>
+    `<tr><td class="num">${i}</td><td class="mono">${esc(s.instance_type)}</td>` +
+    `<td>${esc(s.cloud)} / ${esc(s.region)}</td>` +
+    `<td class="num">${esc(s.layers)}</td><td class="num">${esc(s.tp)}</td></tr>`).join("");
+  const html = `<div class="facts">` + [
+    fact("Rank", `${c.rank}, attempt ${c.attempt}`),
+    fact("Score", c.score != null ? `${c.score} req/s per $/h` : "-"),
+    fact("Price", c.cost_per_hour != null ? `$${c.cost_per_hour}/h` : "-"),
+    fact("Estimated", `${c.throughput_rps ?? "-"} req/s, ` +
+      (c.latency_seconds != null ? `${c.latency_seconds} s` : "latency -")),
+  ].join("") + `</div>` +
+    `<div class="scroll"><table><thead><tr>` +
+    `<th title="The pipeline rank. Rank 0's vLLM is the one the endpoint reaches.">Rank</th>` +
+    `<th>Machine</th><th>Where</th><th>Layers</th><th>TP</th></tr></thead>` +
+    `<tbody>${stages}</tbody></table></div>`;
+  return { summary: `rank ${c.rank}, $${c.cost_per_hour}/h, attempt ${c.attempt}`, html };
+}
+
+/* When the operator says a plan cannot be rented, what the plan IS: its pipelines, machines
+   and seller. Not a reason of this screen's own -- which of those facts the operator's rule
+   turns on is the operator's to say -- but the facts a reader needs to see it. */
+function whyNotRented(plan) {
+  if (plan.executable !== false) return "";
+  const pipes = plan.pipelines || [];
+  const facts = [];
+  if (pipes.some((q) => q.vendor === "aws")) facts.push("priced from AWS's table");
+  if (pipes.length > 1) facts.push(`${pipes.length} pipelines`);
+  if ((plan.nodes || 0) > 1) facts.push(`${plan.nodes} machines`);
+  return facts.join(", ");
+}
+
+/* The ranked plans, one row each. Rank 1 is the best SCORE, not the cheapest (HYPERUN-SERVING-
+   PLAN in servingPlanHtml above says why), so the score column comes first after the rank. */
+function servingPlansHtml(view) {
+  const plans = view.serving_plans || [];
+  const chosen = view.serving_plan_chosen || null;
+  const catalog = view.serving_catalog
+    ? `<p class="dim tiny">Ranked on: ${esc(view.serving_catalog)}</p>` : "";
+  if (!plans.length) {
+    return { summary: "no plans yet",
+             html: catalog + `<p class="dim">The planner has not answered yet.</p>` };
+  }
+  const rows = plans.map((p) => {
+    const isChosen = Boolean(chosen) && chosen.rank === p.rank;
+    const rentable = p.executable === true ? "yes" : p.executable === false
+      ? `no <span class="dim tiny">${esc(whyNotRented(p))}</span>` : "-";
+    return `<tr${isChosen ? ' class="chosen"' : ""}>` +
+      `<td class="num">${esc(p.rank)}${isChosen ? ' <span class="tiny"><b>chosen</b></span>' : ""}</td>` +
+      `<td class="num">${esc(p.score ?? "-")}</td>` +
+      `<td class="num">${p.cost_per_hour != null ? "$" + esc(p.cost_per_hour) : "-"}</td>` +
+      `<td class="num">${esc(p.throughput_rps ?? "-")}</td>` +
+      `<td class="num">${p.latency_seconds != null ? esc(p.latency_seconds) + " s" : "-"}</td>` +
+      `<td class="num">${esc(p.nodes ?? "-")}</td><td>${rentable}</td></tr>`;
+  }).join("");
+  const best = plans.reduce((a, b) => (b.rank < a.rank ? b : a));
+  return {
+    summary: `${plans.length} plan${plans.length === 1 ? "" : "s"}, rank ${best.rank} ` +
+      (best.score != null ? `scores ${best.score} at ` : "is ") + `$${best.cost_per_hour}/h`,
+    html: catalog + `<div class="scroll"><table><thead><tr><th>Rank</th>` +
+      `<th title="Estimated requests per second per dollar-hour: the number the ranks are sorted by">Score</th>` +
+      `<th>$/h</th><th>req/s</th><th>Latency</th><th>VMs</th>` +
+      `<th title="Whether the operator can rent and run this plan. When it cannot, the plan's shape is shown.">Rentable</th>` +
+      `</tr></thead><tbody>${rows}</tbody></table></div>`,
+  };
+}
+
+/* Clear the key from the page. Called by Hide, by drawServing, and by route() on every
+   navigation, so a key shown once does not survive into a screen that did not ask for it. */
+function hideServingKey() {
+  $("sv-d-key-value").textContent = "";
+  $("sv-d-key").hidden = true;
+  $("sv-d-key-toggle").textContent = "Show API key";
+  $("sv-d-key-note").innerHTML = "";
+}
+
+async function drawServingForm() {
+  servingSourceRules();
+  $("sv-cost").innerHTML = servingCostHtml(parseFloat($("sv-budget").value),
+                                           parseFloat($("sv-max").value));
+  if (servingFormDrawn) return;
+  try {
+    const guide = await call("/v1/serving-models");
+    $("sv-preset").innerHTML = (guide.presets || []).map((p) =>
+      `<option value="${esc(p.preset)}"${p.preset === guide.recommended ? " selected" : ""}>` +
+      `${esc(p.preset)} (${esc(p.name)})${p.gated ? ", gated" : ""}</option>`).join("");
+    $("sv-recommend").textContent = guide.recommended ? `recommended: ${guide.recommended}` : "";
+    $("sv-recommend").title = guide.recommendation || "";
+    servingFormDrawn = true;
+  } catch (err) {
+    $("sv-model-note").innerHTML = note("err", err.message);
+  }
+  try {
+    const own = (await call("/v1/secrets")).own || [];
+    $("sv-token").innerHTML = `<option value="">None</option>` + own.map((n) =>
+      `<option value="${esc(n)}"${n === "HF_TOKEN" ? " selected" : ""}>${esc(n)}</option>`).join("");
+  } catch { /* the select keeps None, which is a valid choice */ }
+}
+
+function drawServings(arg) {
+  $("sv-list-view").hidden = Boolean(arg);
+  $("sv-detail-view").hidden = !arg;
+  if (arg) {
+    drawServing(arg);
+    return;
+  }
+  drawServingForm();
+  poll.every(15, async () => {
+    try {
+      const answer = await call("/v1/servings");
+      const rows = answer.servings || [];
+      $("sv-count").textContent = `${rows.length} serving${rows.length === 1 ? "" : "s"}`;
+      $("sv-body").innerHTML = servingRowsHtml(rows);
+      $("sv-body").querySelectorAll("tr[data-serving]").forEach((tr) => {
+        tr.onclick = () => go("servings", tr.dataset.serving);
+      });
+    } catch (err) {
+      $("sv-body").innerHTML = note("err", err.message);
+    }
+  });
+}
+
+function drawServing(name) {
+  hideServingKey();
+  $("sv-d-name").textContent = name;
+  ["sv-d-badge", "sv-d-model", "sv-d-facts", "sv-d-message", "sv-d-chosen", "sv-d-plans"]
+    .forEach((id) => { $(id).innerHTML = ""; });
+  $("sv-d-url").textContent = "-";
+  poll.every(10, async () => {
+    let view;
+    try {
+      view = await call(`/v1/servings/${encodeURIComponent(name)}`);
+    } catch (err) {
+      $("sv-d-message").innerHTML = note("err", err.message);
+      return;
+    }
+    // The reader may have opened another serving while this was in flight.
+    if ($("sv-d-name").textContent !== name) return;
+    const endpoint = view.endpoint || {};
+    $("sv-d-badge").innerHTML = badge(view.phase || "Accepted");
+    $("sv-d-model").textContent = (view.model || {}).name || "";
+    $("sv-d-facts").innerHTML = servingFactsHtml(view);
+    $("sv-d-message").innerHTML = (view.billing ? note("info", view.billing) : "") +
+      (view.message ? note("warn", view.message) : "");
+    $("sv-d-url").textContent = store.server + (endpoint.path || "");
+    $("sv-d-ready").textContent = endpoint.ready ? "ready" : "not ready yet: it answers 503 until it is";
+    const chosen = servingChosenHtml(view);
+    $("sv-d-chosen-note").textContent = chosen.summary;
+    $("sv-d-chosen").innerHTML = chosen.html;
+    const plans = servingPlansHtml(view);
+    $("sv-d-plans-note").textContent = plans.summary;
+    $("sv-d-plans").innerHTML = plans.html;
+  });
+}
+
+$("sv-source").onchange = servingSourceRules;
+["sv-budget", "sv-max"].forEach((id) => {
+  $(id).oninput = () => {
+    $("sv-cost").innerHTML = servingCostHtml(parseFloat($("sv-budget").value),
+                                             parseFloat($("sv-max").value));
+  };
+});
+
+$("sv-lookup").onclick = async () => {
+  const body = readServingForm();
+  const ask = body.model.config_url ? { config_url: body.model.config_url }
+                                    : { model: body.model.name, revision: body.model.revision };
+  if (body.hf_token_secret) ask.hf_token_secret = body.hf_token_secret;
+  $("sv-model-note").innerHTML = `<p class="dim">Reading config.json...</p>`;
+  try {
+    const answer = await call("/v1/model-config", { method: "POST", body: JSON.stringify(ask) });
+    $("sv-model-note").innerHTML = modelConfigHtml(answer);
+  } catch (err) {
+    $("sv-model-note").innerHTML = note("err", err.message);
+  }
+};
+
+$("sv-create").onclick = async () => {
+  $("sv-create").disabled = true;
+  $("sv-create-note").innerHTML = "";
+  try {
+    const view = await call("/v1/servings", { method: "POST", body: JSON.stringify(readServingForm()) });
+    go("servings", view.name);
+  } catch (err) {
+    $("sv-create-note").innerHTML = note("err", err.message);
+  } finally {
+    $("sv-create").disabled = false;
+  }
+};
+
+$("sv-d-key-toggle").onclick = async () => {
+  if (!$("sv-d-key").hidden) {
+    hideServingKey();
+    return;
+  }
+  const name = $("sv-d-name").textContent;
+  try {
+    const answer = await call(`/v1/servings/${encodeURIComponent(name)}/api-key`);
+    if ($("sv-d-name").textContent !== name) return;
+    $("sv-d-key-value").textContent = answer.api_key;
+    $("sv-d-key").hidden = false;
+    $("sv-d-key-toggle").textContent = "Hide API key";
+  } catch (err) {
+    $("sv-d-key-note").innerHTML = note("err", err.message);
+  }
+};
+
+$("sv-d-delete").onclick = async () => {
+  const name = $("sv-d-name").textContent.trim();
+  if (!name || !window.confirm(
+        `Delete serving ${name}?\n\nIts machines are given back and its billing stops. The ` +
+        `endpoint and its API key stop working.`)) return;
+  $("sv-d-delete").disabled = true;
+  try {
+    await call(`/v1/servings/${encodeURIComponent(name)}`, { method: "DELETE" });
+    poll.stop();
+    go("servings");
+  } catch (err) {
+    $("sv-d-message").innerHTML = note("err", err.message);
+  } finally {
+    $("sv-d-delete").disabled = false;
+  }
+};
 
 /* ------------------------------------------------------------ 3b. Scripts */
 

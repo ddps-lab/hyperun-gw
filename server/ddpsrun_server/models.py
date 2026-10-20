@@ -1091,6 +1091,10 @@ class ServingPipelineView(BaseModel):
 
     domain: str = Field(description="`<provider>/<region>`, e.g. "
                         "`hyperstack/montreal-canada-2`. Every stage of one pipeline is in it.")
+    vendor: str = Field(default="", description="Who sells the pipeline's machines: "
+                        "`shadeform`, or `aws` for a plan priced from ShuntServe's AWS "
+                        "on-demand table, which is listed and never rented. Empty from an "
+                        "operator that does not write it.")
     throughput_rps: str | None = Field(default=None, description="Estimated requests/second.")
     cost_per_hour: str | None = Field(default=None, description="US dollars per hour.")
     stages: list[ServingStageView] = Field(default_factory=list)
@@ -1166,6 +1170,7 @@ def serving_plans_from(status: dict[str, Any]) -> list[ServingPlanView]:
             ]
             pipelines.append(ServingPipelineView(
                 domain=str(pipe.get("domain") or ""),
+                vendor=str(pipe.get("vendor") or ""),
                 throughput_rps=_text(pipe.get("throughputRPS")),
                 cost_per_hour=_text(pipe.get("costPerHour")),
                 stages=stages,

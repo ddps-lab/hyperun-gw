@@ -72,6 +72,7 @@
     <button data-view="home" class="on">Home</button>
     <button data-view="jobs">Jobs</button>
     <button data-view="submit">Submit</button>
+    <button data-view="servings">Servings</button>
     <button data-view="scripts">Scripts</button>
     <button data-view="team">Team</button>
     <button data-view="vendors">Vendors</button>
@@ -903,6 +904,122 @@
     </div>
   </div>
   <div id="scripts-list"></div>
+</section>
+
+<!-- ------------------------------------------------------------ 5b. Servings
+     HYPERUN-SERVING. A model served behind an OpenAI-compatible endpoint. ONE section for the
+     list, the New serving form and one serving's page, because the nav lights its button by the
+     section's name (show() in app.js) and the page of one serving belongs under Servings, not
+     under Jobs. #/servings shows sv-list-view; #/servings/<name> shows sv-detail-view.
+     ★ A SERVING BILLS BY THE HOUR UNTIL IT IS DELETED, unlike a job, which ends by itself. The
+     form says the hourly and daily ceiling before Create, and the page says the current rate. -->
+<section id="view-servings" hidden>
+  <div id="sv-list-view">
+    <div class="head">
+      <div class="spacer"><h1>Servings</h1><p class="dim small" id="sv-count"></p></div>
+    </div>
+    <div class="panel"><div id="sv-body"></div></div>
+
+    <details class="acc" id="sv-new" open>
+      <summary>
+        <span class="acc-title">New serving</span>
+        <span class="acc-note">a model behind an OpenAI-compatible endpoint, billed by the hour until you delete it</span>
+        <span class="spacer"></span>
+      </summary>
+      <div class="acc-body">
+        <div class="grid2">
+          <label><span><b>Name *</b> <span class="dim">part of the endpoint URL</span></span>
+            <input id="sv-name" placeholder="chat-8b" autocomplete="off"></label>
+          <label><span><b>Model from</b></span>
+            <select id="sv-source">
+              <option value="preset" selected>A preset the planner carries</option>
+              <option value="hf">A Hugging Face id</option>
+              <option value="url">A config.json URL</option>
+            </select></label>
+          <label id="sv-preset-box"><span><b>Preset</b> <span class="dim" id="sv-recommend"></span></span>
+            <select id="sv-preset"></select></label>
+          <label id="sv-hf-box" hidden><span><b>Hugging Face id</b> <span class="dim">Llama 3.x, Qwen2.5, Qwen3 dense or Mistral dense</span></span>
+            <input id="sv-hf" placeholder="Qwen/Qwen3-8B" autocomplete="off"></label>
+          <label id="sv-url-box" hidden><span><b>config.json URL</b> <span class="dim">https only</span></span>
+            <input id="sv-url" placeholder="https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json" autocomplete="off"></label>
+          <label id="sv-rev-box" hidden><span><b>Revision</b> <span class="dim">optional</span></span>
+            <input id="sv-revision" placeholder="main" autocomplete="off"></label>
+          <label><span><b>Hugging Face token</b> <span class="dim">a value you registered, for a gated model</span></span>
+            <select id="sv-token"><option value="">None</option></select></label>
+        </div>
+        <div class="row"><button class="flat small" id="sv-lookup" type="button">Look up this model</button></div>
+        <div id="sv-model-note"></div>
+        <div class="grid2">
+          <label><span><b>Average input</b> <span class="dim">tokens per prompt, 763 if empty</span></span>
+            <input id="sv-in" type="number" min="1" step="1" placeholder="763"></label>
+          <label><span><b>Average output</b> <span class="dim">tokens per answer, 232 if empty</span></span>
+            <input id="sv-out" type="number" min="1" step="1" placeholder="232"></label>
+          <label><span><b>Hourly budget *</b> <span class="dim">$/h for all machines together</span></span>
+            <input id="sv-budget" type="number" min="0" step="any" placeholder="3.00"></label>
+          <label><span><b>Total cap</b> <span class="dim">$ in all; optional</span></span>
+            <input id="sv-max" type="number" min="0" step="any" placeholder="none"></label>
+          <label><span><b>Image</b> <span class="dim">optional; the operator's vLLM if empty</span></span>
+            <input id="sv-image" placeholder="vllm/vllm-openai:v0.10.0" autocomplete="off"></label>
+        </div>
+        <div id="sv-cost"></div>
+        <div class="row"><button class="go" id="sv-create" type="button">Create serving</button></div>
+        <div id="sv-create-note"></div>
+      </div>
+    </details>
+  </div>
+
+  <div id="sv-detail-view" hidden>
+    <div class="head">
+      <div class="spacer">
+        <div class="row"><h1 id="sv-d-name">-</h1><span id="sv-d-badge"></span></div>
+        <p class="dim small mono" id="sv-d-model"></p>
+      </div>
+      <div class="actions">
+        <button class="flat" data-goto="servings">Back to servings</button>
+        <button class="flat" id="sv-d-delete">Delete serving</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="facts" id="sv-d-facts"></div>
+      <div id="sv-d-message"></div>
+    </div>
+    <!-- HYPERUN-SERVING-KEY. The key is read ONCE per click and never stored: not in
+         localStorage, not in a variable that outlives the page. Hide clears it, and so does
+         opening any serving page (drawServing). -->
+    <details class="acc" id="sv-d-endpoint" open>
+      <summary>
+        <span class="acc-title">Endpoint</span>
+        <span class="acc-note" id="sv-d-ready"></span>
+        <span class="spacer"></span>
+      </summary>
+      <div class="acc-body">
+        <label><span><b>OpenAI base_url</b> <span class="dim">authenticate with the serving's API key, not your login</span></span>
+          <div class="code line" data-copy><pre><code id="sv-d-url">-</code></pre></div></label>
+        <div class="row"><button class="flat small" id="sv-d-key-toggle" type="button">Show API key</button></div>
+        <div id="sv-d-key" hidden>
+          <div class="code line" data-copy><pre><code id="sv-d-key-value"></code></pre></div>
+          <p class="dim tiny">Send it as <span class="mono">Authorization: Bearer</span>. Anyone holding it can use this serving and its bill.</p>
+        </div>
+        <div id="sv-d-key-note"></div>
+      </div>
+    </details>
+    <details class="acc" open>
+      <summary>
+        <span class="acc-title">Chosen plan</span>
+        <span class="acc-note" id="sv-d-chosen-note"></span>
+        <span class="spacer"></span>
+      </summary>
+      <div class="acc-body" id="sv-d-chosen"></div>
+    </details>
+    <details class="acc" open>
+      <summary>
+        <span class="acc-title">Ranked plans</span>
+        <span class="acc-note" id="sv-d-plans-note"></span>
+        <span class="spacer"></span>
+      </summary>
+      <div class="acc-body" id="sv-d-plans"></div>
+    </details>
+  </div>
 </section>
 
 <!-- ------------------------------------------------------------ 6. Vendors -->

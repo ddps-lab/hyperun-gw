@@ -672,6 +672,7 @@ One copy of the model, its layers split in order across its stages' machines.
 | `domain` | yes | `<provider>/<region>`, e.g. `hyperstack/montreal-canada-2`. Every stage of one pipeline is in it. |
 | `stages` |  |  |
 | `throughput_rps` |  | Estimated requests/second. |
+| `vendor` |  | Who sells the pipeline's machines: `shadeform`, or `aws` for a plan priced from ShuntServe's AWS on-demand table, which is listed and never rented. Empty from an operator that does not write it. |
 
 ### ServingPlanChosenView
 

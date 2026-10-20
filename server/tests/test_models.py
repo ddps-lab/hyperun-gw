@@ -874,14 +874,14 @@ SERVING_STATUS = {
         {"rank": 2, "score": "0.308", "priceBasis": "on_demand", "costPerHour": "8.0700",
          "throughputRPS": "2.488", "latencySeconds": "26.021", "nodes": 5, "executable": False,
          "pipelines": [
-             {"domain": "hyperstack/montreal-canada-2", "throughputRPS": "1.274",
-              "costPerHour": "4.0500", "stages": [
+             {"domain": "hyperstack/montreal-canada-2", "vendor": "shadeform",
+              "throughputRPS": "1.274", "costPerHour": "4.0500", "stages": [
                   {"instanceType": "hyperstack_A100_80Gx2", "zone": "montreal-canada-2",
                    "layers": 53, "tp": 2, "pricePerHour": "2.7000"},
                   {"instanceType": "hyperstack_A100_80G", "zone": "montreal-canada-2",
                    "layers": 27, "tp": 1, "pricePerHour": "1.3500"}]},
-             {"domain": "massedcompute/kansascity-usa-1", "throughputRPS": "1.214",
-              "costPerHour": "4.0200", "stages": [
+             {"domain": "massedcompute/kansascity-usa-1", "vendor": "shadeform",
+              "throughputRPS": "1.214", "costPerHour": "4.0200", "stages": [
                   {"instanceType": "massedcompute_L40S", "zone": "kansascity-usa-1",
                    "layers": 16, "tp": 1, "pricePerHour": "0.8800"},
                   {"instanceType": "massedcompute_L40Sx2", "zone": "kansascity-usa-1",
@@ -908,6 +908,8 @@ def test_the_view_carries_the_ranked_plans_and_the_one_rented():
     assert second.nodes == 5 and second.executable is False and second.price_basis == "on_demand"
     assert [q.domain for q in second.pipelines] == ["hyperstack/montreal-canada-2",
                                                     "massedcompute/kansascity-usa-1"]
+    # Who sells each pipeline, as PACSrun writes it (ServingPipelineStatus.Vendor).
+    assert [q.vendor for q in second.pipelines] == ["shadeform", "shadeform"]
     stage = second.pipelines[0].stages[0]
     assert (stage.instance_type, stage.zone, stage.layers, stage.tp, stage.price_per_hour) == \
         ("hyperstack_A100_80Gx2", "montreal-canada-2", 53, 2, "2.7000")

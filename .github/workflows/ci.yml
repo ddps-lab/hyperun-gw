@@ -190,6 +190,10 @@ jobs:
       # panel's estimate beside measurement (null prints as "not measured", never as 0).
       - name: Serving plan 과 Serving check 패널
         run: node ui/serving_plan_test.js
+      # HYPERUN-SERVING. The Servings screen: the create body, the cost ceiling shown before
+      # Create, the plans and machines it draws, and that the API key is never stored.
+      - name: Servings 화면
+        run: node ui/servings_test.js
 
   references-current:
     name: agent reference 가 코드와 맞는지
