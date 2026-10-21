@@ -25,7 +25,7 @@ spec.placement.servingPlan, step 7 returns the planner's ranked plans, and
 `GET /v1/jobs/{job_id}/serving-check` reads back what a serving check measured
 (HYPERUN-SERVING-PLAN, HYPERUN-SERVING-CHECK-ROUTE).
 
-A SERVING is the other shape of the same idea: a HyperunServing that stays up
+A SERVING is the other shape of the same idea: a HyperServing that stays up
 behind an OpenAI-compatible endpoint. `POST /v1/servings` creates it the way
 step 4-5 create a job, `GET /v1/servings/{name}` reads it back, and
 `/v1/servings/{ns}/{name}/v1/*` is the endpoint itself, authenticated by the
@@ -2258,7 +2258,7 @@ def get_serving_check(
 #
 #   GET    /v1/serving-models                       presets, dense families, a recommendation
 #   POST   /v1/model-config                         an HF id or URL -> spec.model.config
-#   POST   /v1/servings                             create a HyperunServing
+#   POST   /v1/servings                             create a HyperServing
 #   GET    /v1/servings                             list them (no plans: size)
 #   GET    /v1/servings/{name}                      one, with plans and the endpoint path
 #   DELETE /v1/servings/{name}                      delete it; the operator gives back the machines
@@ -2334,7 +2334,7 @@ def model_config_route(body: ModelConfigRequest, request: Request,
 
 def _serving_or_404(request: Request, principal: Principal, name: str,
                     namespace: str) -> dict[str, Any]:
-    """One HyperunServing the caller may see, or 404 (HYPERUN-OWNER-GATE, as for jobs)."""
+    """One HyperServing the caller may see, or 404 (HYPERUN-OWNER-GATE, as for jobs)."""
     if not K8S_NAME.fullmatch(name):
         raise HTTPException(status_code=404, detail="no such serving")
     try:
@@ -2379,7 +2379,7 @@ def create_serving(body: ServingRequest, request: Request,
         model_spec = servings.resolve_model(body, token)
     except modelconfig.ModelConfigError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
-    obj = servings.to_hyperunserving(body, principal, model_spec)
+    obj = servings.to_hyperserving(body, principal, model_spec)
     try:
         created = cluster.create_serving(principal.namespace, obj)
     except Conflict:

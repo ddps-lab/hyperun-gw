@@ -20,7 +20,7 @@ END-TO-END FLOW of this file:
      metrics endpoint, whose whole purpose is to read one of the lines the relay
      masks. See its docstring for why the redaction lives at the point of use.
   7. HYPERUN-SERVING. `create_serving()`, `get_serving()`, `list_servings()` and
-     `delete_serving()` do for a HyperunServing what the job methods do for a
+     `delete_serving()` do for a HyperServing what the job methods do for a
      HyperunJob. `serving_api_key()` reads the one Secret per serving the
      operator creates (`<name>-api-key`), for the endpoint proxy and for the
      "show API key" route. `user_secret_value()` reads one registered value,
@@ -347,11 +347,11 @@ class Cluster:
     # ------------------------------------------------------------ HYPERUN-SERVING
 
     def create_serving(self, namespace: str, body: dict[str, Any]) -> dict[str, Any]:
-        """Create one HyperunServing.
+        """Create one HyperServing.
 
         Args:
             namespace: the caller's namespace, from their token.
-            body: what `servings.to_hyperunserving` produced.
+            body: what `servings.to_hyperserving` produced.
 
         Returns:
             The object as the API server stored it.
@@ -374,12 +374,12 @@ class Cluster:
             if exc.status == 404:
                 raise ClusterError(
                     f"kube-apiserver does not know {SERVING_PLURAL}.{SERVING_GROUP}/"
-                    f"{SERVING_VERSION}: the HyperunServing CRD is not installed on this "
+                    f"{SERVING_VERSION}: the HyperServing CRD is not installed on this "
                     f"cluster yet") from exc
             raise ClusterError(_api_message(exc)) from exc
 
     def get_serving(self, namespace: str, name: str) -> dict[str, Any]:
-        """Fetch one HyperunServing by name.
+        """Fetch one HyperServing by name.
 
         Raises:
             NotFound: no serving of that name in that namespace, or the CRD is not installed
@@ -397,7 +397,7 @@ class Cluster:
             raise ClusterError(_api_message(exc)) from exc
 
     def list_servings(self, namespace: str) -> list[dict[str, Any]]:
-        """Every HyperunServing in one namespace.
+        """Every HyperServing in one namespace.
 
         Returns:
             The objects; empty for a namespace with none, and also when the CRD is not
@@ -406,7 +406,7 @@ class Cluster:
 
         Raises:
             ClusterError: the apiserver refused for another reason. A 403 means the gateway's
-                ClusterRole lacks `list` on hyperunservings (config/deploy/rbac.yaml).
+                ClusterRole lacks `list` on hyperservings (config/deploy/rbac.yaml).
         """
         try:
             response = self._custom.list_namespaced_custom_object(
@@ -420,7 +420,7 @@ class Cluster:
         return list(response.get("items") or [])
 
     def delete_serving(self, namespace: str, name: str) -> None:
-        """Delete one HyperunServing. The operator watches for it and gives back what it rented.
+        """Delete one HyperServing. The operator watches for it and gives back what it rented.
 
         Raises:
             NotFound: no serving of that name in that namespace.

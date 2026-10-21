@@ -461,7 +461,7 @@ What `POST /v1/model-config` returns: the model's structure, or a 422 saying why
 | `name` | yes | The HF id, "" for a URL that is not huggingface.co. |
 | `notes` |  | What was derived rather than read, and what the planner may get wrong for this model. |
 | `revision` |  |  |
-| `spec_config` | yes | The same numbers in the camelCase shape HyperunServing's spec.model.config takes, for an agent writing the object itself. |
+| `spec_config` | yes | The same numbers in the camelCase shape HyperServing's spec.model.config takes, for an agent writing the object itself. |
 
 ### MonitorFindingView
 

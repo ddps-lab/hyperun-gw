@@ -55,13 +55,13 @@ rules:
   - apiGroups: ["hyperun.io"]
     resources: ["hyperunjobs"]
     verbs: ["create", "get", "list", "patch", "delete"]
-  # HYPERUN-SERVING. Create, read, list and delete a HyperunServing: POST/GET/DELETE
+  # HYPERUN-SERVING. Create, read, list and delete a HyperServing: POST/GET/DELETE
   # /v1/servings. `delete` is how a serving stops billing: the operator watches for the object
   # going away and gives back its machines, exactly as for a job. `watch` is granted so a later
   # screen can follow a serving's phase without polling; nothing calls it today. No `patch` or
   # `update`: a serving is not edited through the gateway, it is deleted and created again.
   - apiGroups: ["hyperun.io"]
-    resources: ["hyperunservings"]
+    resources: ["hyperservings"]
     verbs: ["get", "list", "watch", "create", "delete"]
   # Find the pod behind a job, so `/v1/jobs/{id}/logs` knows whose stdout to read.
   # `list` and not `get`: the server looks a pod up by label, never by name.
@@ -126,7 +126,7 @@ subjects:
     namespace: hyperun-system
 ---
 # HYPERUN-SERVING-KEY. What the serving endpoint and "show API key" need: `get` on the Secret
-# `<serving>-api-key` the operator creates beside each HyperunServing (key `api-key`).
+# `<serving>-api-key` the operator creates beside each HyperServing (key `api-key`).
 #
 # ★ THIS IS A WIDER GRANT THAN EVERY OTHER SECRET RULE IN THIS FILE, AND THAT IS ITS PRICE.
 # RBAC's `resourceNames` takes exact names and cannot say "any name ending in -api-key", and the
@@ -141,7 +141,7 @@ subjects:
 # key" stop working there, both answering 502 with the apiserver's 403 in the message.
 #
 # WHAT WOULD REMOVE THE NEED (operator side, not done here): the operator writes the SHA-256 of
-# the key into the HyperunServing's status for the endpoint to compare, and adds the exact
+# the key into the HyperServing's status for the endpoint to compare, and adds the exact
 # Secret name to a per-namespace Role's resourceNames when it creates the Secret. Then this
 # rule could name `<serving>-api-key` objects one by one.
 #

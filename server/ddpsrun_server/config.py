@@ -33,15 +33,23 @@ PACSJOB_GROUP = "hyperun.io"
 PACSJOB_VERSION = "v1alpha1"
 PACSJOB_PLURAL = "hyperunjobs"
 
-# HYPERUN-SERVING. The model-serving kind PACSrun's operator is adding beside HyperunJob: one
-# object asks for a model to be served within an hourly budget, and its status carries the
-# ranked plans, the chosen plan and the endpoint (contract of 2026-10-20, from the session
-# building the operator side). Same group and version as HyperunJob. If the operator ships it
-# under another version, this is the one place to change.
+# HYPERUN-SERVING. HyperServing, the model-serving kind PACSrun's operator is adding beside
+# HyperunJob: one object asks for a model to be served within an hourly budget, and its status
+# carries the ranked plans, the chosen plan and the endpoint (contract of 2026-10-20, from the
+# session building the operator side). Same group and version as HyperunJob. If the operator
+# ships it under another version, this is the one place to change.
+#
+# ★ THE KIND WAS CALLED HyperunServing (plural hyperunservings) UNTIL 2026-10-21, when the
+# system and this kind were renamed HyperServing. Only the kind, its plural and its singular
+# changed: the API group is still hyperun.io and HyperunJob kept its name. The gateway asks the
+# apiserver for `hyperservings.hyperun.io` and nothing else, so an object created under the old
+# CRD is invisible to it: the list answers without it and a get or delete answers 404. This
+# note is the one place the old name is kept, so a reader holding an old object or log line
+# can grep their way here.
 SERVING_GROUP = "hyperun.io"
 SERVING_VERSION = "v1alpha1"
-SERVING_PLURAL = "hyperunservings"
-SERVING_KIND = "HyperunServing"
+SERVING_PLURAL = "hyperservings"
+SERVING_KIND = "HyperServing"
 # The Secret the operator creates beside each serving, and the key in it that holds the API
 # key a caller of /v1/servings/{ns}/{name}/v1/* presents as `Authorization: Bearer`.
 SERVING_API_KEY_SUFFIX = "-api-key"

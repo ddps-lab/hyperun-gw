@@ -551,7 +551,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     serving_delete = sub.add_parser(
         "serving-delete", help="delete a serving; its machines are given back and billing stops",
-        description="Deletes the HyperunServing. The operator gives back every machine it "
+        description="Deletes the HyperServing. The operator gives back every machine it "
         "rented, and the endpoint stops answering. The API key goes with it.",
     )
     serving_delete.add_argument("name")

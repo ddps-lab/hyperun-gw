@@ -325,7 +325,7 @@ Creates a serving. The planner ranks plans by requests per second per dollar-hou
 
 ## hyperun serving-delete
 
-Deletes the HyperunServing. The operator gives back every machine it rented, and the endpoint stops answering. The API key goes with it.
+Deletes the HyperServing. The operator gives back every machine it rented, and the endpoint stops answering. The API key goes with it.
 
 | argument | required | what it does |
 |---|---|---|

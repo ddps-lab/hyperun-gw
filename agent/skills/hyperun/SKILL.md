@@ -375,7 +375,7 @@ hyperun model-config meta-llama/Llama-3.1-8B-Instruct --hf-token-secret HF_TOKEN
 ```
 
 The answer's `config` goes into `model.config` of the create body unchanged; `spec_config`
-is the same block in the CRD's camelCase if you are writing the HyperunServing object
+is the same block in the CRD's camelCase if you are writing the HyperServing object
 yourself. The route behind it is `POST /v1/model-config`.
 
 If you read `config.json` yourself instead (from the HF id or the URL the user gave), map it

@@ -1,6 +1,6 @@
 """The OpenAI-compatible endpoint of a serving: /v1/servings/{ns}/{name}/v1/* to its vLLM.
 
-HYPERUN-SERVING-PROXY. A HyperunServing's operator starts vLLM on the rank 0 machine of the plan
+HYPERUN-SERVING-PROXY. A HyperServing's operator starts vLLM on the rank 0 machine of the plan
 it rented and writes where that vLLM listens into `status.endpoint.upstream`. This module is what
 lets an OpenAI SDK reach it through the gateway's own address, with the serving's own API key and
 without any hyperun login.
@@ -8,7 +8,7 @@ without any hyperun login.
 END-TO-END FLOW of one proxied request (main.serving_proxy calls `handle`):
 
   1. `bearer_of()` reads `Authorization: Bearer <key>`. None -> 401.
-  2. `Lookups.serving()` fetches the HyperunServing (cached LOOKUP_TTL_SECONDS). Absent -> 404.
+  2. `Lookups.serving()` fetches the HyperServing (cached LOOKUP_TTL_SECONDS). Absent -> 404.
   3. `Lookups.key_digest()` reads the Secret `<name>-api-key`, key `api-key`, and keeps ONLY its
      SHA-256 (cached KEY_TTL_SECONDS). No Secret yet -> 503: the operator has not issued a key.
   4. `hmac.compare_digest` of the two digests. Different -> 401.
@@ -198,7 +198,7 @@ class Lookups:
         self._keys: dict[tuple[str, str], tuple[float, bytes]] = {}
 
     async def serving(self, cluster: Any, namespace: str, name: str) -> dict[str, Any]:
-        """The HyperunServing. Raises NotFound or ClusterError from the cluster."""
+        """The HyperServing. Raises NotFound or ClusterError from the cluster."""
         hit = self._servings.get((namespace, name))
         if hit and self._clock() - hit[0] < LOOKUP_TTL_SECONDS:
             return hit[1]

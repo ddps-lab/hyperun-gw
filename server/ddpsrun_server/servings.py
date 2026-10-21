@@ -1,6 +1,6 @@
 """A model served behind an endpoint: what a caller sends, what they get back, and the object.
 
-HYPERUN-SERVING. A HyperunServing (PACSrun's operator, contract of 2026-10-20) asks for one model
+HYPERUN-SERVING. A HyperServing (PACSrun's operator, contract of 2026-10-20) asks for one model
 to be served within an hourly budget. The operator ranks serving plans with the same ShuntServe
 planner a serving JOB uses, rents the chosen plan, starts vLLM on it, and writes where vLLM
 listens into `status.endpoint.upstream`. This gateway then serves it at
@@ -18,7 +18,7 @@ END-TO-END FLOW of one `POST /v1/servings` (main.create_serving):
   3. `resolve_model()` turns the model ask into the contract's `spec.model`: a preset's numbers
      from modelconfig.PRESETS, a caller's config block checked, or config.json fetched and
      mapped (modelconfig.lookup).
-  4. `to_hyperunserving()` builds the object: name and namespace, the owner label the owner gate
+  4. `to_hyperserving()` builds the object: name and namespace, the owner label the owner gate
      reads, and the spec with the placement a serving needs filled in (on-demand, [shadeform]).
   5. `ServingView.from_object()` goes the other way for every read: plans, the chosen plan with
      its stages, the catalog, the endpoint path, and the billing sentence.
@@ -278,9 +278,9 @@ def resolve_model(body: ServingRequest, token: str | None,
     return spec
 
 
-def to_hyperunserving(body: ServingRequest, principal: Principal,
-                      model_spec: dict[str, Any]) -> dict[str, Any]:
-    """Step 4: the HyperunServing object to create in the caller's namespace.
+def to_hyperserving(body: ServingRequest, principal: Principal,
+                    model_spec: dict[str, Any]) -> dict[str, Any]:
+    """Step 4: the HyperServing object to create in the caller's namespace.
 
     WHAT THE SERVER FILLS AND THE CALLER CANNOT: the namespace (from the token), the owner label
     (HYPERUN-OWNER-GATE reads it, so a namespace-mate cannot read this serving's API key), and
@@ -390,7 +390,7 @@ class ServingView(BaseModel):
 
     @staticmethod
     def from_object(obj: dict[str, Any]) -> "ServingView":
-        """Build the view from a HyperunServing as the apiserver returned it."""
+        """Build the view from a HyperServing as the apiserver returned it."""
         metadata = obj.get("metadata") or {}
         spec = obj.get("spec") or {}
         status = obj.get("status") or {}
@@ -509,7 +509,7 @@ class ModelConfigResponse(BaseModel):
     config: dict[str, Any] = Field(description="snake_case; pass it as model.config to POST "
                                    "/v1/servings.")
     spec_config: dict[str, Any] = Field(description="The same numbers in the camelCase shape "
-                                        "HyperunServing's spec.model.config takes, for an "
+                                        "HyperServing's spec.model.config takes, for an "
                                         "agent writing the object itself.")
     notes: list[str] = Field(default_factory=list, description="What was derived rather than "
                              "read, and what the planner may get wrong for this model.")
