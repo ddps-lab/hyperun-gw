@@ -41,7 +41,7 @@ class FakeCluster:
         self.secrets_forbidden: set[str] = set()
         # HYPERUN-SECRET-EXPIRY. (namespace, name) -> ISO-8601 string.
         self.expiries: dict[tuple[str, str], str] = {}
-        # HYPERUN-SERVING. (namespace, name) -> HyperunServing, and (namespace, serving name)
+        # HYPERUN-SERVING. (namespace, name) -> HyperServing, and (namespace, serving name)
         # -> the API key the operator would have put in <name>-api-key. Every read of a key
         # is counted, so a test can assert the proxy's cache spared the apiserver.
         self.servings: dict[tuple[str, str], dict] = {}

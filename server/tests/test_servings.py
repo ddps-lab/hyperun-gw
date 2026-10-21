@@ -1,4 +1,4 @@
-"""Creating, listing, reading and deleting a HyperunServing through the gateway, and its API key.
+"""Creating, listing, reading and deleting a HyperServing through the gateway, and its API key.
 
 HYPERUN-SERVING. WHAT IT PINS, against test_routes.FakeCluster (whose serving methods mirror
 k8s.Cluster's branches; tests/test_k8s.py drives the real ones):
@@ -54,7 +54,7 @@ STATUS = {
 def seed(cluster, name="chat-8b", owner="alice", namespace="lab-alice", status=None):
     """Put a serving on the fake cluster as the operator would have left it."""
     cluster.servings[(namespace, name)] = {
-        "apiVersion": "hyperun.io/v1alpha1", "kind": "HyperunServing",
+        "apiVersion": "hyperun.io/v1alpha1", "kind": "HyperServing",
         "metadata": {"name": name, "namespace": namespace,
                      "labels": {main.naming.OWNER_LABEL: owner},
                      "creationTimestamp": "2026-10-20T01:00:00Z"},
@@ -75,7 +75,7 @@ def test_a_preset_serving_becomes_the_contracts_object(client, cluster):
     response = as_alice(client, "POST", "/v1/servings", json=PRESET_BODY)
     assert response.status_code == 201, response.text
     obj = cluster.servings[("lab-alice", "chat-8b")]
-    assert (obj["apiVersion"], obj["kind"]) == ("hyperun.io/v1alpha1", "HyperunServing")
+    assert (obj["apiVersion"], obj["kind"]) == ("hyperun.io/v1alpha1", "HyperServing")
     assert obj["metadata"]["labels"] == {main.naming.OWNER_LABEL: "alice"}
     spec = obj["spec"]
     assert spec["model"] == {"name": "meta-llama/Llama-3.1-8B-Instruct",

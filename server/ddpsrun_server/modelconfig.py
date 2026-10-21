@@ -1,6 +1,6 @@
 """Which models a serving can be planned for, and the numbers the planner needs about one.
 
-HYPERUN-MODEL-CONFIG. A HyperunServing names its model in `spec.model` and carries the model's
+HYPERUN-MODEL-CONFIG. A HyperServing names its model in `spec.model` and carries the model's
 structure in `spec.model.config`: the eight numbers ShuntServe's cost model reads (hidden size,
 layer count, attention and KV heads, head size, MLP width, vocabulary, dtype). This module is
 where those numbers come from when the caller did not pick a preset.
@@ -25,7 +25,7 @@ END-TO-END FLOW of one `POST /v1/model-config` (main.model_config_route):
 
 WHY THE GATEWAY FETCHES IT AND NOT THE OPERATOR. The person choosing a model is at the screen or
 the CLI, and a model the planner cannot handle should be refused while they are still choosing,
-not after a HyperunServing exists and its status says so. A coding agent can do the same thing
+not after a HyperServing exists and its status says so. A coding agent can do the same thing
 itself (read config.json, fill `spec.model.config`); agent/skills/hyperun/SKILL.md says how.
 
 WHAT THIS DOES NOT DO. It does not check that vLLM can load the weights, that the weights fit the

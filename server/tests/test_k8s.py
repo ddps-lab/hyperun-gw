@@ -105,7 +105,7 @@ def test_create_serving_turns_409_into_conflict_and_404_into_crd_not_installed()
     assert "CRD is not installed" in str(caught.value)
     custom = Answers(create_namespaced_custom_object={"ok": 1})
     assert Cluster(custom, None).create_serving("ns", body) == {"ok": 1}
-    assert custom.calls[0][1]["plural"] == "hyperunservings"
+    assert custom.calls[0][1]["plural"] == "hyperservings"
 
 
 def test_get_list_delete_serving_read_a_404_as_absence():
