@@ -77,8 +77,14 @@ def run_once(cluster: Any, slack_token: str, link_base: str,
                            "HYPERUN_SLACK_USER_MAP", alert["id"], stock.shape_word(alert),
                            alert.get("owner", ""))
             continue
-        if send(slack_id, stock.message_for(alert, found, summary["fetched_at"], link_base),
-                slack_token):
+        # Block Kit is the message and the text is its stand-in for the notification
+        # preview, the same pair the monitor sends (monitor.notify sends both). A message
+        # Slack refuses for its blocks (invalid_blocks) goes again as the text alone: a
+        # layout the workspace will not draw must not cost the person the news.
+        text = stock.message_for(alert, found, summary["fetched_at"], link_base)
+        blocks = stock.blocks_for(alert, found, summary["fetched_at"], link_base)
+        if (send(slack_id, text, slack_token, blocks=blocks)
+                or send(slack_id, text, slack_token)):
             told.add(alert["id"])
             logger.info("alert %s: %s is in stock in %d place(s); DM sent", alert["id"],
                         stock.shape_word(alert), len(found))

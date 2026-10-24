@@ -3366,6 +3366,17 @@ function slideThumb(group) {
 }
 const thumbWatch = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => entries.forEach((e) => slideThumb(e.target))) : null;
+/* HYPERUN-HEADER-ROOM. The nav fades at its right edge while there is more of it to scroll
+   to (style.css), and stops fading at the end, so the last tab is never left dimmed. */
+function navFade() {
+  const nav = document.querySelector("header nav");
+  if (!nav) return;
+  const more = nav.scrollWidth - nav.clientWidth - nav.scrollLeft > 1;
+  nav.classList.toggle("fade-end", more);
+}
+window.addEventListener("resize", navFade);
+document.querySelector("header nav")?.addEventListener("scroll", navFade, { passive: true });
+
 // The buttons widen when IBM Plex replaces the fallback font, so place both thumbs again then.
 if (document.fonts && document.fonts.ready) {
   document.fonts.ready.then(() => { slideThumb($("theme")); slideThumb($("stock-count")); });
@@ -4071,6 +4082,7 @@ function showApp(on) {
     // measured now. The ResizeObserver would do it too, but a browser that is not painting
     // (a background tab) delivers it late or never, and the thumb would be missing until then.
     slideThumb($("theme"));
+    navFade();
     // HYPERUN-WHO. This line used to read
     //     store.server.replace(/^https?:\/\//, "").slice(0, 32)
     // which printed `api.<your-domain>` in the corner 15.5 reserved for the

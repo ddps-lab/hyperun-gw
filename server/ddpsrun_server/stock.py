@@ -216,8 +216,8 @@ def hits(alert: dict[str, Any], summary: dict[str, Any]) -> list[dict[str, str]]
     """Every (vendor, region) where this alert's GPU is in stock now.
 
     Returns:
-        `[{vendor, region, name}]`, sorted, one entry per region however many machine
-        shapes match there.
+        `[{vendor, region, name, counts}]`, sorted, one entry per region however many
+        machine shapes match there; `counts` is the GPUs-per-machine in stock, ascending.
     """
     found = []
     for vendor in summary.get("vendors", []):
@@ -226,11 +226,12 @@ def hits(alert: dict[str, Any], summary: dict[str, Any]) -> list[dict[str, str]]
         for region in vendor["regions"]:
             if alert.get("region") and region["region"] != alert["region"]:
                 continue
-            if any(o["available"] and o["gpu"] == alert["gpu"]
-                   and (alert.get("gpus") is None or o["gpus"] == alert["gpus"])
-                   for o in region["offers"]):
+            counts = sorted({o["gpus"] for o in region["offers"]
+                             if o["available"] and o["gpu"] == alert["gpu"]
+                             and (alert.get("gpus") is None or o["gpus"] == alert["gpus"])})
+            if counts:
                 found.append({"vendor": vendor["vendor"], "region": region["region"],
-                              "name": region["name"]})
+                              "name": region["name"], "counts": counts})
     return sorted(found, key=lambda h: (h["vendor"], h["name"], h["region"]))
 
 
@@ -295,25 +296,103 @@ def shape_word(alert: dict[str, Any]) -> str:
     return f"{name} ×{alert['gpus']}" if alert.get("gpus") else name
 
 
+VENDOR_NAMES = {"massedcompute": "Massed Compute", "lambdalabs": "Lambda",
+                "hyperstack": "Hyperstack", "crusoe": "Crusoe", "paperspace": "Paperspace",
+                "scaleway": "Scaleway", "vultr": "Vultr", "digitalocean": "DigitalOcean",
+                "nebius": "Nebius", "voltagepark": "Voltage Park", "denvr": "Denvr",
+                "latitude": "Latitude.sh", "excesssupply": "Excess Supply", "imwt": "IMWT",
+                "verda": "Verda", "boostrun": "Boostrun", "horizon": "Horizon",
+                "phyntec": "Phyntec"}
+
+
+def vendor_word(vendor: str) -> str:
+    """`Crusoe` for `crusoe` -- the vendor as the Stock screen writes it."""
+    return VENDOR_NAMES.get(vendor, vendor)
+
+
 def board_link(ui_url: str, alert: dict[str, Any]) -> str:
     """The Stock screen, filtered to this alert's GPU and count."""
     query = f"gpu={alert['gpu']}" + (f"&count={alert['gpus']}" if alert.get("gpus") else "")
     return f"{ui_url.rstrip('/')}/#/stock/{query}" if ui_url else ""
 
 
-def message_for(alert: dict[str, Any], found: list[dict[str, str]], fetched_at: str | None,
-                ui_url: str, limit: int = 5) -> str:
-    """The DM. Korean, like the monitor's, and short enough to read on a lock screen."""
-    where = alert.get("vendor") or "모든 vendor"
-    lines = [f"[hyperun 재고] {shape_word(alert)} 재고가 생겼습니다 ({where})."]
-    for h in found[:limit]:
-        lines.append(f"• {h['vendor']} · {h['name']}")
-    if len(found) > limit:
-        lines.append(f"• 그 밖에 {len(found) - limit}곳")
+def headline(alert: dict[str, Any], found: list[dict[str, Any]]) -> str:
+    """The DM's title: a noun phrase and its count, never a sentence.
+
+    `A100 80GB ×4 재고 발생  |  region 1곳`. The reader's first question is "what, and how
+    much of it", and both fit in the title; "재고가 생겼습니다" answered neither.
+    """
+    return f"{shape_word(alert)} 재고 발생  |  region {len(found)}곳"
+
+
+def _when(fetched_at: str | None) -> str:
+    """`10:50 UTC`, the minute the catalog was read, or `-` when nobody said."""
     stamp = (fetched_at or "")[11:16]
-    tail = f"Shadeform 기준 {stamp} UTC" if stamp else "Shadeform 기준"
+    return f"{stamp} UTC" if stamp else "-"
+
+
+def blocks_for(alert: dict[str, Any], found: list[dict[str, Any]], fetched_at: str | None,
+               ui_url: str, limit: int = 20) -> list[dict[str, Any]]:
+    """The DM as Slack Block Kit, in the shape of cloud-usage's Main 4 and Main 5.
+
+    ★ THE SAME SHAPE AS THE OTHER REPORTS THIS PERSON READS IN THE SAME SLACK: a header,
+    sections under `[ ... ]` labels, a divider between them, and a context line at the
+    bottom (monitor_v2/hyperun/report.py and vendor/report.py). Main 5 puts its table in the
+    body because its body is almost all numbers whose columns must line up, and this one is
+    the same: vendor, place, region and count are what a person scans to pick one.
+
+    ★★ NOUNS AND COUNTS, NOT SENTENCES. Every label and value is a noun phrase with its
+    quantity -- `region 1곳`, `구매 없음` -- so the eye lands on the fact.
+
+    THE TABLE IS A `markdown` BLOCK, which Slack draws as a real table; Main 5 sends the
+    same block. It stops at `limit` rows and the context line counts the rest.
+    """
+    vendors = sorted({h["vendor"] for h in found})
+    rows = found[:limit]
+    table = ("| vendor | 위치 | region | 장비당 GPU |\n| --- | --- | --- | --- |\n" +
+             "\n".join(f"| {vendor_word(h['vendor'])} | {h['name']} | {h['region']} | "
+                       + " ".join(f"×{n}" for n in h["counts"]) + " |" for h in rows))
     link = board_link(ui_url, alert)
-    lines.append(f"{tail} · 대여는 shadeform.com에서 합니다." + (f" <{link}|재고 보기>" if link else ""))
+    context = [f"Shadeform 기준 {_when(fetched_at)}", "10분 간격 확인",
+               "구매 없음 · 대여 경로 shadeform.com"]
+    if len(found) > limit:
+        context.insert(0, f"표 밖 region {len(found) - limit}곳")
+    if link:
+        context.append(f"<{link}|재고 화면>")
+    return [
+        {"type": "header", "text": {"type": "plain_text", "text": headline(alert, found)[:150],
+                                    "emoji": True}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": "*[ 재고 발생 ]*"}},
+        {"type": "section", "fields": [
+            {"type": "mrkdwn", "text": f"*GPU*\n`{shape_word(alert)}`"},
+            {"type": "mrkdwn", "text": "*조건*\n`" + (vendor_word(alert["vendor"])
+                                                      if alert.get("vendor") else "모든 vendor") + "`"},
+            {"type": "mrkdwn", "text": f"*vendor*\n`{len(vendors)}곳`"},
+            {"type": "mrkdwn", "text": f"*region*\n`{len(found)}곳`"},
+        ]},
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn",
+                                     "text": f"*[ region 별 재고  {_when(fetched_at)} ]*"}},
+        {"type": "markdown", "text": table},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": "  ·  ".join(context)}]},
+    ]
+
+
+def message_for(alert: dict[str, Any], found: list[dict[str, Any]], fetched_at: str | None,
+                ui_url: str, limit: int = 5) -> str:
+    """The same DM as plain text: Slack's notification preview, and any client without blocks.
+
+    The blocks are the message and this is the stand-in, but it carries the same facts in
+    the same order, so a person who reads only the preview reads the same story.
+    """
+    lines = [f"[hyperun 재고] {headline(alert, found)}"]
+    for h in found[:limit]:
+        lines.append(f"• {vendor_word(h['vendor'])} · {h['name']} · "
+                     + " ".join(f"×{n}" for n in h["counts"]))
+    if len(found) > limit:
+        lines.append(f"• 그 밖에 region {len(found) - limit}곳")
+    link = board_link(ui_url, alert)
+    lines.append(f"Shadeform 기준 {_when(fetched_at)} · 구매 없음" + (f" · <{link}|재고 화면>" if link else ""))
     return "\n".join(lines)
 
 
