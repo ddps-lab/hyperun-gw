@@ -2730,3 +2730,87 @@ class JobListResponse(BaseModel):
         "list. Equal to len(jobs) when nothing was cut. The screen needs both "
         "numbers to say 'showing 200 of 512' instead of quietly hiding 312.",
     )
+
+
+# ------------------------------------------------------------------ stock (HYPERUN-STOCK)
+
+
+class StockOffer(BaseModel):
+    """One machine shape a region offers, and whether it was in stock."""
+
+    gpu: str = Field(description="The GPU as Shadeform spells it: H100, A100_80G, RTXPro6000.")
+    gpus: int = Field(description="GPUs in one machine of this shape.")
+    available: bool = Field(description="In stock when the operator's CronJob last read Shadeform.")
+
+
+class StockRegion(BaseModel):
+    """One region of one vendor."""
+
+    region: str = Field(description="Shadeform's region id, for example montreal-canada-2.")
+    name: str = Field(description="Its display name, for example 'CA, Montreal'.")
+    in_stock: bool = Field(description="True when ANY GPU shape here was in stock.")
+    offers: list[StockOffer]
+
+
+class StockVendor(BaseModel):
+    """One Shadeform cloud and the regions it sells GPUs in."""
+
+    vendor: str = Field(description="Shadeform's cloud id, for example hyperstack.")
+    regions: list[StockRegion]
+
+
+class StockResponse(BaseModel):
+    """What GET /v1/stock returns."""
+
+    source: str = Field(description="Always 'shadeform'.")
+    fetched_at: str | None = Field(
+        description="When the operator's catalog CronJob read Shadeform, UTC. Everything below "
+        "is as of this moment, not as of the request.")
+    refresh_minutes: int = Field(description="How often that read happens.")
+    stale: bool = Field(
+        description="True when fetched_at is more than an hour old, i.e. the CronJob has "
+        "stopped writing. The board still shows the last stock it has and says so.")
+    vendors: list[StockVendor]
+
+
+class StockAlertRequest(BaseModel):
+    """What POST /v1/stock/alerts takes. Null means 'any'."""
+
+    gpu: str = Field(description="Required, spelled as the catalog spells it, e.g. H100.")
+    gpus: int | None = Field(default=None, description="GPUs in one machine, or null for any.")
+    vendor: str | None = Field(default=None, description="A Shadeform cloud id, or null for any.")
+    region: str | None = Field(default=None, description="A Shadeform region id, or null for any.")
+
+
+class StockAlertState(BaseModel):
+    """What the watcher last found for one alert."""
+
+    in_stock: bool | None = Field(
+        default=None, description="Null until the first check; then whether the GPU is in stock "
+        "anywhere the alert watches.")
+    since: str | None = Field(default=None, description="When the current run of stock began.")
+    places: list[str] = Field(default_factory=list,
+                              description="vendor/region for every place it is in stock.")
+    checked_at: str | None = None
+    notified_at: str | None = Field(
+        default=None, description="When the Slack DM about the current run of stock went. Null "
+        "while in stock means the DM has not gone yet and the next check tries again.")
+
+
+class StockAlertView(BaseModel):
+    """One stored alert, as its owner sees it."""
+
+    id: str
+    gpu: str
+    gpus: int | None = None
+    vendor: str | None = None
+    region: str | None = None
+    created_at: str
+    state: StockAlertState
+
+
+class StockAlertsResponse(BaseModel):
+    """What GET /v1/stock/alerts returns: the caller's alerts only."""
+
+    alerts: list[StockAlertView]
+    limit: int = Field(description="How many alerts one account may keep.")

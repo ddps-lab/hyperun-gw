@@ -1,0 +1,132 @@
+# HYPERUN-STOCK. What the Stock screen and its Slack alerts need in the cluster.
+#
+# THREE THINGS, AND release.yml APPLIES NONE OF THEM. The release only moves the gateway
+# Deployment's image and uploads ui/, so an operator applies this file once, and again only
+# when it changes:
+#
+#   kubectl apply -f config/deploy/hyperun-stock.yaml
+#
+#   1. Role + RoleBinding: the gateway's ServiceAccount may READ the operator's Shadeform
+#      catalog ConfigMap and READ/PATCH the alerts ConfigMap, both by name and nothing else.
+#   2. CronJob hyperun-stock-watch: every 10 minutes, two minutes after the operator's
+#      hyperun-shadeform-catalog CronJob, it checks every alert and DMs its owner when the
+#      GPU has come back into stock (python module stockwatch, HYPERUN-STOCK-WATCH).
+#   3. The alerts ConfigMap itself, which is NOT in this file -- see below.
+#
+# THE ALERTS CONFIGMAP IS CREATED BY HAND, ONCE, because applying it from a file would
+# overwrite every stored alert each time the file is re-applied:
+#
+#   kubectl -n hyperun-system create configmap hyperun-stock-alerts \
+#       --from-literal=allowed-namespaces=<TENANT_NAMESPACE>
+#
+# `allowed-namespaces` is the list of accounts that may set alerts, comma-separated. To
+# enable another account, edit that one key:
+#
+#   kubectl -n hyperun-system edit configmap hyperun-stock-alerts
+#
+# Until the ConfigMap exists, the screen shows the board and leaves the Alerts panel out.
+#
+# THE CRONJOB'S IMAGE DOES NOT FOLLOW RELEASES. Like hyperun-monitor's, it is whatever
+# <IMAGE> was when this file was applied. The watcher only reads two ConfigMaps and sends a
+# DM, so it rarely needs a newer image; when it does, set it:
+#
+#   kubectl -n hyperun-system set image cronjob/hyperun-stock-watch watch=<IMAGE>
+#
+# SLACK. The bot token and the owner-to-Slack-id map are the monitor's, from the Secret
+# hyperun-monitor (config/deploy/hyperun-monitor.yaml). A person who is not in that map is
+# never messaged; the watcher logs it and the screen still shows the stock.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hyperun-gw-stock
+  namespace: hyperun-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["hyperun-shadeform-catalog", "hyperun-stock-alerts"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["hyperun-stock-alerts"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hyperun-gw-stock
+  namespace: hyperun-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hyperun-gw-stock
+subjects:
+  - kind: ServiceAccount
+    name: hyperun-gw
+    namespace: hyperun-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hyperun-stock-watch
+  namespace: hyperun-system
+spec:
+  # Minute 2, 12, 22, ...: the catalog CronJob runs on the tens and takes seconds, so each
+  # pass reads the catalog it just wrote rather than the one it is about to replace.
+  schedule: "2-59/10 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 240
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: hyperun-gw
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+          containers:
+            - name: watch
+              image: <IMAGE>
+              command: ["python", "-m", "ddpsrun_server.stockwatch"]
+              env:
+                # The screen's origin, for the link in the DM. The same value the gateway's
+                # own HYPERUN_UI_ORIGINS holds; the first origin listed is used.
+                - name: HYPERUN_UI_ORIGINS
+                  value: <UI_ORIGIN>
+                - name: HYPERUN_SLACK_BOT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hyperun-monitor
+                      key: slack-bot-token
+                      optional: true
+                - name: HYPERUN_SLACK_USER_MAP
+                  valueFrom:
+                    secretKeyRef:
+                      name: hyperun-monitor
+                      key: slack-user-map
+                      optional: true
+              resources:
+                requests:
+                  cpu: 20m
+                  memory: 128Mi
+                limits:
+                  memory: 384Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              # The root filesystem is read-only, as the monitor's is; /tmp is the one writable
+              # place, for anything a library decides to cache.
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

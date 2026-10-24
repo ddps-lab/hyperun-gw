@@ -312,6 +312,8 @@ async function route() {
     else if (head === "scripts") { show("scripts"); drawScripts(); }
     else if (head === "team")   { show("team");   drawTeam(); }
     else if (head === "vendors") { show("vendors"); drawVendors(); }
+    // HYPERUN-STOCK. #/stock, or #/stock/gpu=H100&count=8 from a Slack alert.
+    else if (head === "stock") { show("stock"); drawStock(arg || ""); }
     else                        { show("home");   drawHome(); }
   } catch (err) {
     console.error(err);
@@ -3137,6 +3139,351 @@ function wireCopy(root = document) {
   });
 }
 
+/* ------------------------------------------------------------------ 7. Stock */
+
+/* HYPERUN-STOCK. Which Shadeform vendor and region has a GPU free right now.
+
+   WHERE IT COMES FROM. GET /v1/stock, which serves the catalog the operator's CronJob reads
+   from Shadeform every 10 minutes -- the same stock the operator places jobs on. Nothing on
+   this screen prices or rents: the reader rents on Shadeform's own site.
+
+   HOW THE SCREEN IS BUILT. The functions that decide what to show (stockFits, stockGpuCounts,
+   stockView, and the *Html ones) take data and return data or markup and touch nothing else,
+   so stock_test.js runs them as shipped. drawStock and its handlers only fetch and paste.
+
+   THE FILTER IS IN THE ADDRESS. #/stock/gpu=H100&count=8 opens the board on H100 x8; it is the
+   link a Slack alert carries, and changing a filter rewrites it in place (replaceState, so the
+   Back button is not filled with filter clicks). */
+
+const STOCK_GPU_NAMES = {
+  A100_80G: "A100 80GB", V100_32G: "V100 32GB", H100_nvl: "H100 NVL", RTXPro6000: "RTX PRO 6000",
+  RTX6000Ada: "RTX 6000 Ada", RTX4000Ada: "RTX 4000 Ada", RTX4090: "RTX 4090", RTX5090: "RTX 5090",
+  RTX6000: "RTX 6000",
+};
+const STOCK_VENDOR_NAMES = {
+  massedcompute: "Massed Compute", lambdalabs: "Lambda", hyperstack: "Hyperstack", crusoe: "Crusoe",
+  paperspace: "Paperspace", scaleway: "Scaleway", vultr: "Vultr", digitalocean: "DigitalOcean",
+  nebius: "Nebius", voltagepark: "Voltage Park", denvr: "Denvr", latitude: "Latitude.sh",
+  excesssupply: "Excess Supply", imwt: "IMWT", verda: "Verda", boostrun: "Boostrun",
+  horizon: "Horizon", phyntec: "Phyntec",
+};
+const stockGpuName = (gpu) => STOCK_GPU_NAMES[gpu] || gpu;
+const stockVendorName = (vendor) => STOCK_VENDOR_NAMES[vendor] || vendor;
+
+const stockUI = { data: null, alerts: null, gpu: "", count: 0, only: true, showAll: false };
+
+/* What the address asks for. Anything unreadable is "any", never an error. */
+function stockFilterFrom(arg) {
+  const query = new URLSearchParams(arg || "");
+  const count = Number(query.get("count"));
+  return { gpu: query.get("gpu") || "", count: Number.isInteger(count) && count > 0 ? count : 0 };
+}
+
+/* Whether one offered shape is what the filter asks for. In stock or not is a separate test. */
+function stockFits(offer, filter) {
+  return (!filter.gpu || offer.gpu === filter.gpu) && (!filter.count || offer.gpus === filter.count);
+}
+
+/* [gpu, regions with it in stock] for every GPU sold at the chosen count, most regions first.
+   A GPU nobody has in stock is listed with 0 rather than dropped: "no H200 anywhere" is an
+   answer, and a missing chip would read as "this board does not know H200". */
+function stockGpuCounts(data, count) {
+  const regions = {};
+  for (const v of data.vendors) {
+    for (const r of v.regions) {
+      const sold = new Set(), held = new Set();
+      for (const o of r.offers) {
+        if (count && o.gpus !== count) continue;
+        sold.add(o.gpu);
+        if (o.available) held.add(o.gpu);
+      }
+      for (const gpu of sold) regions[gpu] = (regions[gpu] || 0) + (held.has(gpu) ? 1 : 0);
+    }
+  }
+  return Object.entries(regions)
+    .sort((a, b) => b[1] - a[1] || stockGpuName(a[0]).localeCompare(stockGpuName(b[0])));
+}
+
+/* The vendors and regions to draw. A region appears when it SELLS what the filter asks for;
+   `hits` is what of that is in stock. Vendors with stock come first, and in a vendor the
+   regions with stock come first, because "where can I rent one now" is the question. */
+function stockView(data, filter) {
+  let regionsIn = 0, regionsSold = 0, vendorsIn = 0;
+  const vendors = [];
+  for (const v of data.vendors) {
+    const regions = [];
+    for (const r of v.regions) {
+      const sold = r.offers.filter((o) => stockFits(o, filter));
+      if (!sold.length) continue;
+      regions.push({ region: r, hits: sold.filter((o) => o.available) });
+    }
+    if (!regions.length) continue;
+    regions.sort((a, b) => (b.hits.length > 0) - (a.hits.length > 0) ||
+      a.region.name.localeCompare(b.region.name) || a.region.region.localeCompare(b.region.region));
+    const inStock = regions.filter((x) => x.hits.length).length;
+    regionsIn += inStock; regionsSold += regions.length; if (inStock) vendorsIn++;
+    vendors.push({ vendor: v.vendor, regions, inStock });
+  }
+  vendors.sort((a, b) => b.inStock - a.inStock ||
+    stockVendorName(a.vendor).localeCompare(stockVendorName(b.vendor)));
+  return { vendors, regionsIn, regionsSold, vendorsIn };
+}
+
+/* "H100 ×8", "A100 80GB", "8-GPU machines", "Any GPU" -- the filter in words. */
+function stockShapeWord(filter) {
+  if (filter.gpu) return stockGpuName(filter.gpu) + (filter.count ? " ×" + filter.count : "");
+  return filter.count ? `${filter.count}-GPU machines` : "Any GPU";
+}
+
+function stockChipsHtml(data, filter, showAll) {
+  const counts = stockGpuCounts(data, filter.count);
+  const anyRegions = stockView(data, { gpu: "", count: filter.count }).regionsIn;
+  const chip = (gpu, label, n, cls) =>
+    `<button type="button" class="chip${cls}" data-gpu="${esc(gpu)}" ` +
+    `aria-pressed="${String(filter.gpu === gpu)}" title="${n} region${n === 1 ? "" : "s"} with stock">` +
+    `${esc(label)} <span class="n">${n}</span></button>`;
+  const out = [chip("", "Any GPU", anyRegions, "")];
+  const hidden = counts.filter(([gpu, n]) => !n && gpu !== filter.gpu);
+  for (const [gpu, n] of counts) {
+    if (!n && gpu !== filter.gpu && !showAll) continue;
+    out.push(chip(gpu, stockGpuName(gpu), n, n ? "" : " zero"));
+  }
+  if (hidden.length) {
+    out.push(`<button type="button" class="chip more" data-more="1" aria-expanded="${String(showAll)}">` +
+      (showAll ? "Hide GPUs without stock" : `+${hidden.length} without stock`) + `</button>`);
+  }
+  return out.join("");
+}
+
+function stockCardsHtml(data, view, filter) {
+  let regions = 0, inStock = 0, vendorsIn = 0;
+  for (const v of data.vendors) {
+    let any = false;
+    for (const r of v.regions) { regions++; if (r.in_stock) { inStock++; any = true; } }
+    if (any) vendorsIn++;
+  }
+  return [
+    card("Regions with stock", `${inStock} of ${regions}`, inStock ? "ok" : ""),
+    card("Vendors with stock", `${vendorsIn} of ${data.vendors.length}`, vendorsIn ? "ok" : ""),
+    card(`${stockShapeWord(filter)} in stock`, `${view.regionsIn} of ${view.regionsSold} regions`,
+         view.regionsIn ? "ok" : ""),
+  ].join("");
+}
+
+/* "Updated 07:50 UTC · 12 min ago", and the dot that says whether that is still current. */
+function stockFreshHtml(data, nowMs) {
+  const at = Date.parse(data.fetched_at || "");
+  if (!Number.isFinite(at)) return `<span class="live-dot stale"></span>Never read`;
+  const minutes = Math.max(0, Math.round((nowMs - at) / 60000));
+  const ago = minutes < 60 ? `${minutes} min ago` : `${Math.floor(minutes / 60)} h ${minutes % 60} min ago`;
+  const stamp = new Date(at).toISOString().slice(11, 16) + " UTC";
+  return `<span class="live-dot${data.stale ? " stale" : ""}"></span>` +
+    (data.stale ? "Stale · last read " : "Updated ") + `<b>${stamp}</b> · ${ago}`;
+}
+
+/* One region's in-stock shapes, grouped by GPU: "A100 80GB ×1 ×2 ×8" rather than three chips. */
+function stockShapesHtml(hits) {
+  const byGpu = {};
+  for (const o of hits) (byGpu[o.gpu] = byGpu[o.gpu] || new Set()).add(o.gpus);
+  return Object.keys(byGpu).sort((a, b) => stockGpuName(a).localeCompare(stockGpuName(b)))
+    .map((gpu) => `<span class="shape">${esc(stockGpuName(gpu))}<i>` +
+      [...byGpu[gpu]].sort((a, b) => a - b).map((n) => "×" + n).join(" ") + `</i></span>`)
+    .join("");
+}
+
+const STOCK_EMPTY_ICON = `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
+  `stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+  `<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg>`;
+
+function stockBoardHtml(view, filter, only, alertsOn) {
+  const cards = [];
+  for (const v of view.vendors) {
+    const rows = v.regions.filter((x) => !only || x.hits.length);
+    if (!rows.length) continue;
+    const strip = v.regions.map((x) =>
+      `<i class="${x.hits.length ? "ok" : ""}" title="${esc(x.region.name)}: ${x.hits.length ? "in stock" : "no stock"}"></i>`).join("");
+    cards.push(`<div class="vcard${v.inStock ? "" : " none"}">` +
+      `<div class="vhead"><div class="vtitle"><span class="name">${esc(stockVendorName(v.vendor))}</span>` +
+      `<span class="id">${esc(v.vendor)}</span>` +
+      `<span class="count"><b>${v.inStock}</b> of ${v.regions.length} regions</span></div>` +
+      `<div class="vstrip" aria-hidden="true">${strip}</div></div>` +
+      rows.map(({ region, hits }) => `<div class="srow${hits.length ? "" : " out"}">` +
+        `<span class="badge ${hits.length ? "ok" : "wait"}">${hits.length ? "In stock" : "No stock"}</span>` +
+        `<div class="where"><b title="${esc(region.name)}">${esc(region.name)}</b>` +
+        (region.name !== region.region ? `<span>${esc(region.region)}</span>` : "") + `</div>` +
+        (hits.length ? `<div class="shapes">${stockShapesHtml(hits)}</div>` : "") +
+        `</div>`).join("") +
+      `</div>`);
+  }
+  if (cards.length) return cards.join("");
+  const what = stockShapeWord(filter);
+  return `<div class="empty">${STOCK_EMPTY_ICON}<p>No region has ${esc(what)} in stock right now.` +
+    (alertsOn ? " Set an alert below and a Slack DM arrives when it does." : "") + `</p></div>`;
+}
+
+/* The caller's alerts, newest first, each with what the watcher last found. */
+function stockAlertRowsHtml(alerts) {
+  if (!alerts.length) return `<p class="dim small">No alert set.</p>`;
+  return alerts.slice().sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).map((a) => {
+    const s = a.state || {};
+    const status = s.in_stock === true ? ["ok", "In stock"] : s.in_stock === false ? ["wait", "Waiting"]
+      : ["wait", "Not checked yet"];
+    const detail = s.in_stock === true
+      ? (s.notified_at ? `DM sent ${when(s.notified_at)} UTC` : "DM not sent yet")
+      : s.checked_at ? `no stock at ${when(s.checked_at)} UTC` : "first check within 10 minutes";
+    const shape = stockGpuName(a.gpu) + (a.gpus ? " ×" + a.gpus : "");
+    return `<div class="arow"><span class="badge ${status[0]}">${status[1]}</span>` +
+      `<span class="what">${esc(shape)}</span>` +
+      `<span class="dim small">${esc(a.vendor ? stockVendorName(a.vendor) : "any vendor")}</span>` +
+      `<span class="dim tiny">${esc(detail)}</span><span class="spacer"></span>` +
+      `<button class="ghost tiny" type="button" data-remove="${esc(a.id)}">Remove</button></div>`;
+  }).join("");
+}
+
+/* What POST /v1/stock/alerts takes, read off the form. "" is "any", sent as null. */
+function readStockAlertForm() {
+  const count = $("stock-a-count").value;
+  return { gpu: $("stock-a-gpu").value, gpus: count ? Number(count) : null,
+           vendor: $("stock-a-vendor").value || null, region: null };
+}
+
+/* HYPERUN-SEGMENTED. Put a segmented control's thumb under its selected button (style.css). A
+   group that is not laid out yet (hidden, or its font still loading) measures 0 and is left
+   for the ResizeObserver to finish. */
+function slideThumb(group) {
+  if (!group) return;
+  const on = group.querySelector("button.on");
+  if (!on || !on.offsetWidth) return;
+  // From the rectangles rather than offsetLeft/offsetWidth, which round to whole pixels: the
+  // thumb sits in the group's padding box, so the border is taken off the left edge.
+  const box = group.getBoundingClientRect(), rect = on.getBoundingClientRect();
+  group.style.setProperty("--thumb-x", (rect.left - box.left - group.clientLeft).toFixed(2) + "px");
+  group.style.setProperty("--thumb-w", rect.width.toFixed(2) + "px");
+  if (!group.classList.contains("has-thumb")) {
+    void group.offsetWidth; // the first placement lands without sliding in from the edge
+    group.classList.add("has-thumb");
+  }
+}
+const thumbWatch = typeof ResizeObserver === "function"
+  ? new ResizeObserver((entries) => entries.forEach((e) => slideThumb(e.target))) : null;
+// The buttons widen when IBM Plex replaces the fallback font, so place both thumbs again then.
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => { slideThumb($("theme")); slideThumb($("stock-count")); });
+}
+
+function redrawStock() {
+  const data = stockUI.data;
+  // A read that lands after the reader has moved to another screen draws nothing: it would
+  // otherwise rewrite THAT screen's address to #/stock through replaceState below.
+  if (!data || $("view-stock").hidden) return;
+  const filter = { gpu: stockUI.gpu, count: stockUI.count };
+  const view = stockView(data, filter);
+  $("stock-cards").innerHTML = stockCardsHtml(data, view, filter);
+  $("stock-gpu").innerHTML = stockChipsHtml(data, filter, stockUI.showAll);
+  $("stock-board").innerHTML = stockBoardHtml(view, filter, stockUI.only, stockUI.alerts !== null);
+  $("stock-fresh").innerHTML = stockFreshHtml(data, Date.now());
+  document.querySelectorAll("#stock-count button").forEach((b) => {
+    const on = Number(b.dataset.count) === stockUI.count;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", String(on));
+  });
+  slideThumb($("stock-count"));
+  $("stock-only").setAttribute("aria-checked", String(stockUI.only));
+  const query = (stockUI.gpu ? "gpu=" + encodeURIComponent(stockUI.gpu) : "") +
+    (stockUI.count ? (stockUI.gpu ? "&" : "") + "count=" + stockUI.count : "");
+  history.replaceState(null, "", "#/stock" + (query ? "/" + query : ""));
+}
+
+async function loadStock() {
+  try { stockUI.data = await call("/v1/stock"); }
+  catch (err) {
+    if (!stockUI.data) $("stock-board").innerHTML = note("err", err.message);
+    $("stock-fresh").innerHTML = `<span class="live-dot stale"></span>Could not read stock`;
+    return;
+  }
+  redrawStock();
+  drawStockAlertForm();
+}
+
+/* The alert form's choices come from the board's own data, so it can only ask about a GPU and
+   a vendor the catalog actually has. */
+function drawStockAlertForm() {
+  if (stockUI.alerts === null || !stockUI.data) return;
+  const gpus = stockGpuCounts(stockUI.data, 0).map(([gpu]) => gpu)
+    .sort((a, b) => stockGpuName(a).localeCompare(stockGpuName(b)));
+  const keep = $("stock-a-gpu").value || stockUI.gpu || "H100";
+  $("stock-a-gpu").innerHTML = gpus.map((gpu) =>
+    `<option value="${esc(gpu)}"${gpu === keep ? " selected" : ""}>${esc(stockGpuName(gpu))}</option>`).join("");
+  const vendor = $("stock-a-vendor").value;
+  $("stock-a-vendor").innerHTML = `<option value="">Any vendor</option>` +
+    stockUI.data.vendors.map((v) => v.vendor)
+      .sort((a, b) => stockVendorName(a).localeCompare(stockVendorName(b)))
+      .map((v) => `<option value="${esc(v)}"${v === vendor ? " selected" : ""}>${esc(stockVendorName(v))}</option>`)
+      .join("");
+}
+
+async function loadStockAlerts() {
+  try {
+    const answer = await call("/v1/stock/alerts");
+    stockUI.alerts = answer.alerts || [];
+  } catch {
+    // 403 is the expected answer for every account the operator has not enabled, and the
+    // panel simply stays out of sight; any other failure is said in the panel itself.
+    stockUI.alerts = null;
+    $("stock-alerts").hidden = true;
+    return;
+  }
+  $("stock-alerts").hidden = false;
+  $("stock-alert-list").innerHTML = stockAlertRowsHtml(stockUI.alerts);
+  drawStockAlertForm();
+}
+
+async function drawStock(arg) {
+  const filter = stockFilterFrom(arg);
+  stockUI.gpu = filter.gpu;
+  stockUI.count = filter.count;
+  if (thumbWatch) thumbWatch.observe($("stock-count"));
+  if (stockUI.data) redrawStock();
+  await loadStockAlerts();
+  // The catalog changes every 10 minutes and the server holds it for a minute, so once a
+  // minute keeps "12 min ago" honest without asking for anything new more often than that.
+  poll.every(60, loadStock);
+}
+
+$("stock-gpu").addEventListener("click", (event) => {
+  if (event.target.closest("[data-more]")) { stockUI.showAll = !stockUI.showAll; redrawStock(); return; }
+  const chip = event.target.closest("[data-gpu]");
+  if (!chip) return;
+  stockUI.gpu = chip.dataset.gpu;
+  redrawStock();
+});
+$("stock-count").addEventListener("click", (event) => {
+  const b = event.target.closest("[data-count]");
+  if (!b) return;
+  stockUI.count = Number(b.dataset.count);
+  redrawStock();
+});
+$("stock-only").addEventListener("click", () => { stockUI.only = !stockUI.only; redrawStock(); });
+$("stock-alert-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("stock-alert-msg").innerHTML = "";
+  try {
+    await call("/v1/stock/alerts", { method: "POST", body: JSON.stringify(readStockAlertForm()) });
+  } catch (err) {
+    $("stock-alert-msg").innerHTML = note("err", err.message);
+    return;
+  }
+  await loadStockAlerts();
+});
+$("stock-alert-list").addEventListener("click", async (event) => {
+  const b = event.target.closest("[data-remove]");
+  if (!b) return;
+  b.disabled = true;
+  try { await call("/v1/stock/alerts/" + encodeURIComponent(b.dataset.remove), { method: "DELETE" }); }
+  catch (err) { $("stock-alert-msg").innerHTML = note("err", err.message); b.disabled = false; return; }
+  await loadStockAlerts();
+});
+
 /* HYPERUN-THEME-TOGGLE. Three states. "system" is stored as the ABSENCE of a
    key, so a browser that has never touched the control and one that has chosen
    Auto are the same state -- there is no third value to keep in step with the
@@ -3149,8 +3496,15 @@ function setTheme(next) {
     if (next === "system") localStorage.removeItem("hyperun.theme");
     else localStorage.setItem("hyperun.theme", next);
   } catch { /* private mode: the choice lasts for this page only. */ }
-  if (next === "system") delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = next;
+  // HYPERUN-THEME-FADE. A quarter-second cross-fade instead of a snap (style.css, html.theming).
+  // The class comes off again on a timer, because a permanent transition on every element
+  // would animate every hover on the screen.
+  const root = document.documentElement;
+  root.classList.add("theming");
+  clearTimeout(setTheme.timer);
+  setTheme.timer = setTimeout(() => root.classList.remove("theming"), 320);
+  if (next === "system") delete root.dataset.theme;
+  else root.dataset.theme = next;
   drawTheme();
 }
 function drawTheme() {
@@ -3159,6 +3513,10 @@ function drawTheme() {
     b.classList.toggle("on", b.dataset.themeSet === now);
     b.setAttribute("aria-pressed", String(b.dataset.themeSet === now));
   });
+  // HYPERUN-SEGMENTED. The header is hidden until sign-in, so the first measurement often
+  // finds nothing; the observer places the thumb once the header is laid out.
+  slideThumb($("theme"));
+  if (thumbWatch) thumbWatch.observe($("theme"));
 }
 document.querySelectorAll("#theme button[data-theme-set]").forEach((b) => {
   b.onclick = () => setTheme(b.dataset.themeSet);
@@ -3709,6 +4067,10 @@ function showApp(on) {
   $("bar").hidden = !on;
   document.querySelector("main").hidden = !on;
   if (on) {
+    // HYPERUN-SEGMENTED. The header has just been laid out, so the theme toggle can be
+    // measured now. The ResizeObserver would do it too, but a browser that is not painting
+    // (a background tab) delivers it late or never, and the thumb would be missing until then.
+    slideThumb($("theme"));
     // HYPERUN-WHO. This line used to read
     //     store.server.replace(/^https?:\/\//, "").slice(0, 32)
     // which printed `api.<your-domain>` in the corner 15.5 reserved for the

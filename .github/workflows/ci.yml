@@ -194,6 +194,9 @@ jobs:
       # Create, the plans and machines it draws, and that the API key is never stored.
       - name: Servings 화면
         run: node ui/servings_test.js
+      - name: Stock 화면
+        # HYPERUN-STOCK. 재고 board 의 필터와 그리기, 알림 행, 주소의 필터.
+        run: node ui/stock_test.js
 
   references-current:
     name: agent reference 가 코드와 맞는지

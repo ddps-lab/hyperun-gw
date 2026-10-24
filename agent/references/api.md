@@ -51,6 +51,10 @@ Authorization: Bearer <your token>
 | GET | `/v1/servings/{ns}/{name}/v1/{path}` | The serving's OpenAI-compatible endpoint. HYPERUN-SERVING-PROXY. |
 | POST | `/v1/servings/{ns}/{name}/v1/{path}` | The serving's OpenAI-compatible endpoint. HYPERUN-SERVING-PROXY. |
 | GET | `/v1/stats` | What this caller's team has spent. |
+| GET | `/v1/stock` | Which Shadeform vendor and region has a GPU in stock, as of the last catalog read. |
+| GET | `/v1/stock/alerts` | The caller's stock alerts, with what the watcher last found for each. |
+| POST | `/v1/stock/alerts` | Ask for a Slack DM when a GPU comes into stock. |
+| DELETE | `/v1/stock/alerts/{alert_id}` | Remove one of the caller's stock alerts. Another account's id is a 404, not a 403. |
 | GET | `/v1/usage` | Who spent what, day by day, across every namespace. Operators only. |
 | POST | `/v1/validate` | Check a job without running it. |
 
@@ -800,6 +804,94 @@ What /v1/stats returns.
 | `unowned_jobs` |  | How many of `jobs` were applied straight to the cluster with kubectl and so carry no hyperun.io/owner label. They are in every total here and in no row of `members`: that table's columns are facts about a person, and three non-people in a row (`default` the namespace, `admin` the role, `kubectl` the tool) were each read as a colleague. The screen states this as a sentence instead. |
 | `unpriced_jobs` |  |  |
 | `vendors` |  | The same jobs added up by who sold the machines — computed in the same pass as members, so the two tables cannot disagree. |
+
+### StockAlertRequest
+
+What POST /v1/stock/alerts takes. Null means 'any'.
+
+| field | required | description |
+|---|---|---|
+| `gpu` | yes | Required, spelled as the catalog spells it, e.g. H100. |
+| `gpus` |  | GPUs in one machine, or null for any. |
+| `region` |  | A Shadeform region id, or null for any. |
+| `vendor` |  | A Shadeform cloud id, or null for any. |
+
+### StockAlertState
+
+What the watcher last found for one alert.
+
+| field | required | description |
+|---|---|---|
+| `checked_at` |  |  |
+| `in_stock` |  | Null until the first check; then whether the GPU is in stock anywhere the alert watches. |
+| `notified_at` |  | When the Slack DM about the current run of stock went. Null while in stock means the DM has not gone yet and the next check tries again. |
+| `places` |  | vendor/region for every place it is in stock. |
+| `since` |  | When the current run of stock began. |
+
+### StockAlertView
+
+One stored alert, as its owner sees it.
+
+| field | required | description |
+|---|---|---|
+| `created_at` | yes |  |
+| `gpu` | yes |  |
+| `gpus` |  |  |
+| `id` | yes |  |
+| `region` |  |  |
+| `state` | yes |  |
+| `vendor` |  |  |
+
+### StockAlertsResponse
+
+What GET /v1/stock/alerts returns: the caller's alerts only.
+
+| field | required | description |
+|---|---|---|
+| `alerts` | yes |  |
+| `limit` | yes | How many alerts one account may keep. |
+
+### StockOffer
+
+One machine shape a region offers, and whether it was in stock.
+
+| field | required | description |
+|---|---|---|
+| `available` | yes | In stock when the operator's CronJob last read Shadeform. |
+| `gpu` | yes | The GPU as Shadeform spells it: H100, A100_80G, RTXPro6000. |
+| `gpus` | yes | GPUs in one machine of this shape. |
+
+### StockRegion
+
+One region of one vendor.
+
+| field | required | description |
+|---|---|---|
+| `in_stock` | yes | True when ANY GPU shape here was in stock. |
+| `name` | yes | Its display name, for example 'CA, Montreal'. |
+| `offers` | yes |  |
+| `region` | yes | Shadeform's region id, for example montreal-canada-2. |
+
+### StockResponse
+
+What GET /v1/stock returns.
+
+| field | required | description |
+|---|---|---|
+| `fetched_at` | yes | When the operator's catalog CronJob read Shadeform, UTC. Everything below is as of this moment, not as of the request. |
+| `refresh_minutes` | yes | How often that read happens. |
+| `source` | yes | Always 'shadeform'. |
+| `stale` | yes | True when fetched_at is more than an hour old, i.e. the CronJob has stopped writing. The board still shows the last stock it has and says so. |
+| `vendors` | yes |  |
+
+### StockVendor
+
+One Shadeform cloud and the regions it sells GPUs in.
+
+| field | required | description |
+|---|---|---|
+| `regions` | yes |  |
+| `vendor` | yes | Shadeform's cloud id, for example hyperstack. |
 
 ### SubmitResponse
 
