@@ -136,14 +136,46 @@ def test_a_dm_that_did_not_go_is_tried_again():
     assert len(fire) == 1 and alerts[0]["state"]["in_stock"] is True
 
 
-def test_the_message_names_the_shape_the_places_and_the_link():
+def test_the_fallback_text_is_nouns_and_counts():
     alert = stock.new_alert({"gpu": "A100_80G", "gpus": 8}, "lab-alice", "alice", NOW)
-    found = [{"vendor": f"v{i}", "region": f"r{i}", "name": f"Place {i}"} for i in range(7)]
+    found = [{"vendor": "crusoe", "region": f"r{i}", "name": f"Place {i}", "counts": [8]}
+             for i in range(7)]
     text = stock.message_for(alert, found, "2026-10-24T07:50:01Z", "https://ui.example")
-    assert text.startswith("[hyperun 재고] A100 80GB ×8 재고가 생겼습니다 (모든 vendor).")
-    assert "• v0 · Place 0" in text and "• v5" not in text and "그 밖에 2곳" in text
-    assert "07:50 UTC" in text
-    assert "<https://ui.example/#/stock/gpu=A100_80G&count=8|재고 보기>" in text
+    assert text.startswith("[hyperun 재고] A100 80GB ×8 재고 발생  |  region 7곳")
+    assert "• Crusoe · Place 0 · ×8" in text and "Place 5" not in text
+    assert "그 밖에 region 2곳" in text and "07:50 UTC" in text and "구매 없음" in text
+    assert "<https://ui.example/#/stock/gpu=A100_80G&count=8|재고 화면>" in text
+    assert "니다" not in text, "the DM is nouns and counts, not sentences"
+
+
+def test_the_dm_blocks_follow_the_cloud_usage_reports():
+    alert = stock.new_alert({"gpu": "H100", "gpus": None, "vendor": "lambdalabs"},
+                            "lab-alice", "alice", NOW)
+    summary = stock.summarize(catalog(
+        row("lambdalabs", "H100", 1, ("dulles-usa-1", True), ("phoenix-usa-2", True)),
+        row("lambdalabs", "H100", 8, ("dulles-usa-1", True))), NOW)
+    found = stock.hits(alert, summary)
+    assert [h["counts"] for h in found] == [[1, 8], [1]]
+    blocks = stock.blocks_for(alert, found, "2026-10-24T07:50:01Z", "https://ui.example")
+    kinds = [b["type"] for b in blocks]
+    assert kinds == ["header", "section", "section", "divider", "section", "markdown", "context"]
+    assert blocks[0]["text"]["text"] == "H100 재고 발생  |  region 2곳"
+    fields = [f["text"] for f in blocks[2]["fields"]]
+    assert fields == ["*GPU*\n`H100`", "*조건*\n`Lambda`", "*vendor*\n`1곳`", "*region*\n`2곳`"]
+    table = blocks[5]["text"].splitlines()
+    assert table[0] == "| vendor | 위치 | region | 장비당 GPU |"
+    assert table[2] == "| Lambda | Dulles | dulles-usa-1 | ×1 ×8 |"
+    context = blocks[6]["elements"][0]["text"]
+    assert "Shadeform 기준 07:50 UTC" in context and "구매 없음" in context
+    assert "<https://ui.example/#/stock/gpu=H100|재고 화면>" in context
+
+
+def test_a_long_table_stops_and_counts_the_rest():
+    alert = stock.new_alert({"gpu": "H100"}, "lab-alice", "alice", NOW)
+    found = [{"vendor": "v", "region": f"r{i}", "name": f"P{i}", "counts": [1]} for i in range(25)]
+    blocks = stock.blocks_for(alert, found, None, "", limit=20)
+    assert len(blocks[5]["text"].splitlines()) == 22
+    assert blocks[6]["elements"][0]["text"].startswith("표 밖 region 5곳")
 
 
 def test_read_alerts_takes_a_list_separated_by_commas_or_lines():
@@ -299,8 +331,9 @@ def watcher(core, monkeypatch):
     monkeypatch.setenv("HYPERUN_SLACK_USER_MAP", json.dumps({"alice": "U0ALICE"}))
     sent = []
 
-    def send(slack_id, text, token):
+    def send(slack_id, text, token, blocks=None):
         sent.append((slack_id, text, token))
+        send.blocks = blocks
         return send.ok
     send.ok = True
     cluster = k8s.Cluster(None, core)
@@ -322,7 +355,8 @@ def test_the_watcher_messages_once_and_records_it(core, watcher):
     assert watcher(h100_nowhere()) == 0
     assert watcher(h100_in_montreal()) == 1
     slack_id, text, token = watcher.sent[0]
-    assert slack_id == "U0ALICE" and token == "xoxb-test" and "hyperstack" in text
+    assert slack_id == "U0ALICE" and token == "xoxb-test" and "Hyperstack" in text
+    assert watcher.send.blocks[0]["type"] == "header", "the DM goes as Block Kit with its text"
     assert core.alerts()[0]["state"]["notified_at"] == "2026-10-24T08:00:00Z"
     assert watcher() == 0 and len(watcher.sent) == 1
 

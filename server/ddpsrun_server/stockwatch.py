@@ -77,8 +77,11 @@ def run_once(cluster: Any, slack_token: str, link_base: str,
                            "HYPERUN_SLACK_USER_MAP", alert["id"], stock.shape_word(alert),
                            alert.get("owner", ""))
             continue
+        # Block Kit is the message and the text is its stand-in for the notification
+        # preview, the same pair the monitor sends (monitor.notify sends both).
         if send(slack_id, stock.message_for(alert, found, summary["fetched_at"], link_base),
-                slack_token):
+                slack_token,
+                blocks=stock.blocks_for(alert, found, summary["fetched_at"], link_base)):
             told.add(alert["id"])
             logger.info("alert %s: %s is in stock in %d place(s); DM sent", alert["id"],
                         stock.shape_word(alert), len(found))
