@@ -72,8 +72,10 @@ from .config import (
     SERVING_GROUP,
     SERVING_PLURAL,
     SERVING_VERSION,
+    SYSTEM_NAMESPACE,
     USER_SECRET_NAME,
 )
+from .stock import ALERTS_CONFIGMAP, ALERTS_KEY, CATALOG_CONFIGMAP, CATALOG_KEY
 
 # HYPERUN-SECRET-EXPIRY. Where a registered value's expiry date is kept: an
 # annotation on the namespace's own Secret, one per name.
@@ -492,6 +494,72 @@ class Cluster:
         if not encoded:
             raise NotFound(name)
         return base64.b64decode(encoded).decode("utf-8")
+
+    def shadeform_catalog(self) -> dict[str, Any]:
+        """The Shadeform catalog the operator's CronJob keeps (HYPERUN-STOCK).
+
+        Read from the ConfigMap, never from Shadeform: the operator already pays for one read
+        every 10 minutes, and the board should show the stock the operator places jobs on.
+
+        Raises:
+            NotFound: the ConfigMap does not exist, i.e. the catalog CronJob was never deployed.
+            ClusterError: the apiserver refused (no RBAC, see config/deploy/hyperun-stock.yaml),
+                or the ConfigMap holds no document this service can parse.
+        """
+        try:
+            cm = self._core.read_namespaced_config_map(name=CATALOG_CONFIGMAP,
+                                                       namespace=SYSTEM_NAMESPACE)
+        except ApiException as exc:
+            if exc.status == 404:
+                raise NotFound(CATALOG_CONFIGMAP) from exc
+            raise ClusterError(_api_message(exc)) from exc
+        text = (cm.data or {}).get(CATALOG_KEY)
+        if not text:
+            raise ClusterError(f"{CATALOG_CONFIGMAP} has no {CATALOG_KEY} yet")
+        try:
+            return json.loads(text)
+        except ValueError as exc:
+            raise ClusterError(f"{CATALOG_CONFIGMAP} holds {CATALOG_KEY} that is not JSON") from exc
+
+    def stock_alerts(self) -> tuple[dict[str, str], str]:
+        """The alerts ConfigMap's data and its resourceVersion (HYPERUN-STOCK).
+
+        The version comes back so the write that follows can be conditional on it: the
+        gateway's replicas and the watcher all write this one object, and a write that
+        silently replaced somebody else's would lose an alert.
+
+        Raises:
+            NotFound: the ConfigMap was never created, which means no namespace is enabled.
+            ClusterError: the apiserver refused.
+        """
+        try:
+            cm = self._core.read_namespaced_config_map(name=ALERTS_CONFIGMAP,
+                                                       namespace=SYSTEM_NAMESPACE)
+        except ApiException as exc:
+            if exc.status == 404:
+                raise NotFound(ALERTS_CONFIGMAP) from exc
+            raise ClusterError(_api_message(exc)) from exc
+        return dict(cm.data or {}), cm.metadata.resource_version
+
+    def put_stock_alerts(self, alerts_json: str, resource_version: str) -> None:
+        """Replace the stored alerts, if nobody else has written since `resource_version`.
+
+        A patch that carries `metadata.resourceVersion` is refused with 409 when the object has
+        moved on, which is the optimistic lock this needs without a lock of its own.
+
+        Raises:
+            Conflict: somebody wrote first. Read again and retry.
+            ClusterError: the apiserver refused for any other reason.
+        """
+        body = {"metadata": {"resourceVersion": resource_version},
+                "data": {ALERTS_KEY: alerts_json}}
+        try:
+            self._core.patch_namespaced_config_map(name=ALERTS_CONFIGMAP,
+                                                   namespace=SYSTEM_NAMESPACE, body=body)
+        except ApiException as exc:
+            if exc.status == 409:
+                raise Conflict(ALERTS_CONFIGMAP) from exc
+            raise ClusterError(_api_message(exc)) from exc
 
     def prometheus_query(self, expr: str, timeout_seconds: int = 10) -> dict:
         """Ask the in-cluster Prometheus one instant query, through the apiserver.

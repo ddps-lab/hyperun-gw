@@ -133,7 +133,11 @@ jobs:
 
   cli-test:
     name: CLI test
-    runs-on: ubuntu-latest
+    # 24.04 에 고정한다. 2026-10-24 에 ubuntu-latest 가 26.04 가 되었고, setup-python 이 그
+    # 이미지용 3.9 를 내려받지 못해 이 job 이 설치 단계에서 실패했다("The version '3.9' with
+    # architecture 'x64' was not found for Ubuntu 26.04"). 3.9 는 지원 기간이 끝나 새 이미지용
+    # 빌드가 나오지 않으므로, 가장 낮은 버전을 시험하려면 3.9 가 있는 이미지에 머물러야 한다.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -194,6 +198,9 @@ jobs:
       # Create, the plans and machines it draws, and that the API key is never stored.
       - name: Servings 화면
         run: node ui/servings_test.js
+      - name: Stock 화면
+        # HYPERUN-STOCK. 재고 board 의 필터와 그리기, 알림 행, 주소의 필터.
+        run: node ui/stock_test.js
 
   references-current:
     name: agent reference 가 코드와 맞는지

@@ -80,6 +80,7 @@ from . import cognito
 from . import measurements
 from . import monitor   # HYPERUN-MONITOR: the rules, shared with the CronJob
 from . import usage    # HYPERUN-USAGE: who spent what, day by day
+from . import stock    # HYPERUN-STOCK: Shadeform stock and the alerts on it
 from . import notify
 from . import terminal as terminal_pump   # HYPERUN-TERMINAL
 from .auth import AuthError, Principal, TokenStore, UnknownUser, bearer_token
@@ -94,6 +95,10 @@ from . import stats as stats_reader
 from . import validate as validator
 from .explain import EXPLAIN_TEXT
 from .models import (
+    StockAlertRequest,
+    StockAlertsResponse,
+    StockAlertView,
+    StockResponse,
     ArtifactFileView,
     ArtifactsResponse,
     CostRange,
@@ -222,6 +227,9 @@ def build_state(app: FastAPI, force: bool = False) -> None:
     # HYPERUN-SERVING-PROXY. The proxy's cache of servings and key digests: one per process, and
     # rebuilt with everything else, so a test never sees the previous test's servings.
     app.state.serving_lookups = proxy.Lookups()
+    # HYPERUN-STOCK. One read of the catalog per minute per process, rebuilt with the rest so
+    # a test never sees the previous test's stock.
+    app.state.stock_cache = {"at": 0.0, "summary": None}
     app.state.ready = True
 
 
@@ -972,6 +980,156 @@ def prices_route(
             f"centers had stock at the moment of the snapshot, which goes stale."
         ),
     )
+
+# ------------------------------------------------------------------ stock (HYPERUN-STOCK)
+
+
+def _stock_summary(request: Request) -> dict[str, Any]:
+    """The board's summary, read from the operator's ConfigMap at most once a minute.
+
+    Raises:
+        HTTPException: 503 when this deployment has no catalog at all (the operator's
+            Shadeform CronJob is not deployed), 502 when it could not be read.
+    """
+    cache = request.app.state.stock_cache
+    if cache["summary"] is not None and time.monotonic() - cache["at"] < stock.CACHE_SECONDS:
+        return cache["summary"]
+    try:
+        summary = stock.summarize(request.app.state.cluster.shadeform_catalog())
+    except NotFound as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Shadeform stock is not available on this deployment: the operator's "
+                   f"catalog CronJob has not written {stock.CATALOG_CONFIGMAP}.") from exc
+    except (ClusterError, stock.StockError) as exc:
+        raise HTTPException(status_code=502,
+                            detail=f"Shadeform stock could not be read: {exc}") from exc
+    cache.update(at=time.monotonic(), summary=summary)
+    return summary
+
+
+@app.get("/v1/stock", response_model=StockResponse)
+def stock_route(request: Request, principal: PrincipalDep) -> StockResponse:
+    """Which Shadeform vendor and region has a GPU in stock, as of the last catalog read.
+
+    HYPERUN-STOCK. Read from the catalog the operator already keeps (every 10 minutes), so
+    this costs Shadeform nothing and shows the stock the operator places jobs on. Nothing is
+    priced or rented here: the screen says where a machine is free, and a person rents it on
+    Shadeform's own site.
+
+    Returns:
+        Every vendor, every region it sells GPUs in, and per region every (GPU, count) shape
+        with whether it was in stock. `stale` is true when the catalog is over an hour old.
+    """
+    return StockResponse(**_stock_summary(request))
+
+
+def _stock_alerts(request: Request, principal: Principal) -> tuple[list[dict[str, Any]], str]:
+    """Every stored alert and the version they were read at, or the reason the caller may not.
+
+    WHO MAY SET ALERTS IS DATA IN THE CLUSTER, NOT CODE. The namespaces are listed in the
+    ConfigMap the alerts live in (`allowed-namespaces`), which an operator writes once; this
+    repository holds no account name, and enabling another account is one edit of that list.
+
+    Raises:
+        HTTPException: 403 when alerts are not enabled for this caller's namespace, 502 when
+            the ConfigMap could not be read.
+    """
+    try:
+        data, version = request.app.state.cluster.stock_alerts()
+        alerts, allowed = stock.read_alerts(data)
+    except NotFound as exc:
+        raise HTTPException(status_code=403,
+                            detail="Stock alerts are not enabled on this deployment.") from exc
+    except (ClusterError, stock.StockError) as exc:
+        raise HTTPException(status_code=502,
+                            detail=f"Stock alerts could not be read: {exc}") from exc
+    if principal.namespace not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail="Stock alerts are not enabled for this account. An operator adds its "
+                   f"namespace to {stock.ALLOWED_KEY} in {stock.ALERTS_CONFIGMAP}.")
+    return alerts, version
+
+
+@app.get("/v1/stock/alerts", response_model=StockAlertsResponse)
+def stock_alerts_route(request: Request, principal: PrincipalDep) -> StockAlertsResponse:
+    """The caller's stock alerts, with what the watcher last found for each.
+
+    HYPERUN-STOCK. 403 for an account alerts are not enabled for, which is also how the
+    screen learns to leave the Alerts panel out.
+    """
+    alerts, _ = _stock_alerts(request, principal)
+    mine = [a for a in alerts if a.get("namespace") == principal.namespace]
+    return StockAlertsResponse(alerts=[StockAlertView(**a) for a in mine],
+                               limit=stock.MAX_ALERTS_PER_NAMESPACE)
+
+
+@app.post("/v1/stock/alerts", response_model=StockAlertView, status_code=201)
+def stock_alert_create_route(body: StockAlertRequest, request: Request,
+                             principal: PrincipalDep) -> StockAlertView:
+    """Ask for a Slack DM when a GPU comes into stock.
+
+    HYPERUN-STOCK. The watcher checks every 10 minutes, two minutes after the catalog is
+    read, and sends one DM each time the GPU goes from no stock to stock where the alert
+    watches. It rents nothing.
+
+    THE WRITE IS CONDITIONAL ON THE VERSION READ. Every replica of this service and the
+    watcher write the same ConfigMap; a write that lost the race is retried on a fresh read,
+    twice, rather than replacing somebody else's change.
+    """
+    for _ in range(3):
+        alerts, version = _stock_alerts(request, principal)
+        mine = [a for a in alerts if a.get("namespace") == principal.namespace]
+        if len(mine) >= stock.MAX_ALERTS_PER_NAMESPACE:
+            raise HTTPException(status_code=409, detail=(
+                f"This account already has {len(mine)} alerts, the most one account may keep. "
+                "Remove one first."))
+        try:
+            alert = stock.new_alert(body.model_dump(), principal.namespace,
+                                    naming.label_value(principal.user))
+        except stock.AlertError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        same = ("gpu", "gpus", "vendor", "region")
+        if any(all(a.get(k) == alert[k] for k in same) for a in mine):
+            raise HTTPException(status_code=409, detail=(
+                f"An alert for {stock.shape_word(alert)} at "
+                f"{alert['vendor'] or 'any vendor'} is already set."))
+        try:
+            request.app.state.cluster.put_stock_alerts(stock.write_alerts(alerts + [alert]),
+                                                       version)
+        except Conflict:
+            continue
+        except ClusterError as exc:
+            raise HTTPException(status_code=502,
+                                detail=f"The alert could not be stored: {exc}") from exc
+        logger.info("stock alert %s set for %s: %s", alert["id"], principal.namespace,
+                    stock.shape_word(alert))
+        return StockAlertView(**alert)
+    raise HTTPException(status_code=409, detail=(
+        "The alerts changed three times while this one was being stored. Try again."))
+
+
+@app.delete("/v1/stock/alerts/{alert_id}", status_code=204)
+def stock_alert_delete_route(alert_id: str, request: Request, principal: PrincipalDep) -> Response:
+    """Remove one of the caller's stock alerts. Another account's id is a 404, not a 403."""
+    for _ in range(3):
+        alerts, version = _stock_alerts(request, principal)
+        keep = [a for a in alerts
+                if not (a.get("id") == alert_id and a.get("namespace") == principal.namespace)]
+        if len(keep) == len(alerts):
+            raise HTTPException(status_code=404, detail=f"No alert {alert_id} on this account.")
+        try:
+            request.app.state.cluster.put_stock_alerts(stock.write_alerts(keep), version)
+        except Conflict:
+            continue
+        except ClusterError as exc:
+            raise HTTPException(status_code=502,
+                                detail=f"The alert could not be removed: {exc}") from exc
+        return Response(status_code=204)
+    raise HTTPException(status_code=409, detail=(
+        "The alerts changed three times while this one was being removed. Try again."))
+
 
 @app.post("/v1/estimate", response_model=EstimateResponse)
 def estimate_route(body: JudgementRequest, principal: PrincipalDep) -> EstimateResponse:

@@ -76,6 +76,7 @@
     <button data-view="scripts">Scripts</button>
     <button data-view="team">Team</button>
     <button data-view="vendors">Vendors</button>
+    <button data-view="stock">Stock</button>
   </nav>
   <div class="spacer"></div>
   <div class="who">
@@ -1032,6 +1033,69 @@
   <div class="panel">
     <header><h2>Per vendor</h2></header>
     <div id="vendors-body">-</div>
+  </div>
+</section>
+
+<!-- ------------------------------------------------------------ 7. Stock -->
+
+<!-- HYPERUN-STOCK. Which Shadeform vendor and region has a GPU free right now, read from the
+     catalog the operator refreshes every 10 minutes, and -- for an account the operator has
+     enabled -- a Slack DM when a GPU comes back into stock. Nothing on this screen rents or
+     prices anything; the person reading it rents on Shadeform's own site. -->
+<section id="view-stock" hidden>
+  <div class="head">
+    <div class="spacer">
+      <h1>Stock</h1>
+      <p class="dim small">Which Shadeform vendor and region has a GPU free right now. This page only
+        shows stock; rent on shadeform.com.</p>
+    </div>
+    <div class="actions"><span class="fresh" id="stock-fresh"><span class="live-dot"></span>Reading stock…</span></div>
+  </div>
+
+  <div class="cards" id="stock-cards"></div>
+
+  <div class="panel stock-filters">
+    <div class="frow">
+      <span class="flabel">GPU <small>· regions with stock</small></span>
+      <div class="chips" id="stock-gpu" role="group" aria-label="GPU"></div>
+    </div>
+    <div class="frow">
+      <span class="flabel">GPUs per machine</span>
+      <div class="seg" id="stock-count" role="group" aria-label="GPUs per machine">
+        <button type="button" data-count="0" class="on" aria-pressed="true">Any</button>
+        <button type="button" data-count="1" aria-pressed="false">1</button>
+        <button type="button" data-count="2" aria-pressed="false">2</button>
+        <button type="button" data-count="4" aria-pressed="false">4</button>
+        <button type="button" data-count="8" aria-pressed="false">8</button>
+      </div>
+      <div class="spacer"></div>
+      <button type="button" class="switch-row" id="stock-only" role="switch" aria-checked="true">
+        <span class="switch" aria-hidden="true"><i></i></span>Only regions with stock
+      </button>
+    </div>
+  </div>
+
+  <div class="stock-board" id="stock-board"></div>
+
+  <!-- Shown only when GET /v1/stock/alerts answers 200, i.e. for a namespace the operator listed
+       in the hyperun-stock-alerts ConfigMap. Everyone else never sees an Alerts panel. -->
+  <div class="panel" id="stock-alerts" hidden>
+    <header>
+      <h2>Alerts</h2>
+      <span class="dim small">A Slack DM with a link back here when a GPU goes from no stock to stock,
+        checked every 10 minutes. Nothing is rented.</span>
+    </header>
+    <form class="stock-alert-form" id="stock-alert-form">
+      <label>GPU<select id="stock-a-gpu"></select></label>
+      <label>GPUs per machine<select id="stock-a-count">
+        <option value="">Any</option><option value="1">1</option><option value="2">2</option>
+        <option value="4">4</option><option value="8">8</option>
+      </select></label>
+      <label>Vendor<select id="stock-a-vendor"></select></label>
+      <button class="go" type="submit">Add alert</button>
+    </form>
+    <div id="stock-alert-msg"></div>
+    <div class="alist" id="stock-alert-list"></div>
   </div>
 </section>
 

@@ -286,3 +286,8 @@ class Settings:
 # needs no address of its own and no ALB.
 PROMETHEUS_NAMESPACE = "hyperun-system"
 PROMETHEUS_SERVICE = "prometheus"
+
+# HYPERUN-STOCK. The operator's own namespace, where its Shadeform catalog ConfigMap lives and
+# where the stock alerts are kept beside it. The same namespace as Prometheus above, named
+# separately because the two are read for different reasons and one could move without the other.
+SYSTEM_NAMESPACE = "hyperun-system"

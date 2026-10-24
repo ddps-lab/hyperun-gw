@@ -87,6 +87,11 @@
   --radius-lg: 10px;
   --radius-xl: 14px;
 
+  /* Motion. One curve for every transition: fast out of the gate and a long soft landing, so a
+     control answers the click at once and settles without a bounce. Short, because the
+     motion here says "this moved", never anything decorative. */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+
   --sans: "IBM Plex Sans KR", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
           "Malgun Gothic", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -282,6 +287,8 @@ nav button.on { background: var(--primary-soft); color: var(--primary); }
    preference is NOT the same as one who chose light, and collapsing them means
    the page stops following the OS the first time anybody touches the control. */
 .theme-toggle {
+  position: relative;
+  isolation: isolate;
   display: flex;
   gap: 2px;
   padding: 2px;
@@ -292,6 +299,7 @@ nav button.on { background: var(--primary-soft); color: var(--primary); }
 .theme-toggle button {
   font: inherit;
   font-size: var(--text-xs);
+  font-weight: 500;
   line-height: 1;
   color: var(--fg-muted);
   background: none;
@@ -299,9 +307,39 @@ nav button.on { background: var(--primary-soft); color: var(--primary); }
   border-radius: var(--radius-sm);
   padding: 4px 7px;
   cursor: pointer;
+  transition: color 0.16s var(--ease);
 }
 .theme-toggle button:hover { color: var(--fg); }
-.theme-toggle button.on { background: var(--card); color: var(--primary); font-weight: 600; }
+/* The selected button keeps its weight. It used to turn 600, which widened it and pushed its
+   neighbours sideways on every click; the thumb below now carries the selection. */
+.theme-toggle button.on { color: var(--primary); }
+
+/* HYPERUN-SEGMENTED. A segmented control's selection is a THUMB that slides under the chosen
+   button, rather than a background that blinks from one button to the next. The thumb is the
+   group's ::before, placed by two custom properties that slideThumb() (app.js) measures off the
+   selected button, so moving it is one CSS transition and no button ever changes size. Until
+   the first measurement the thumb is hidden and does not animate, so a screen does not open with
+   the thumb sliding in from the left edge. The selected button keeps a fallback fill for the
+   moment before that measurement, so the state is never shown by colour alone. */
+.theme-toggle::before, .seg::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: var(--thumb-inset, 2px);
+  bottom: var(--thumb-inset, 2px);
+  left: 0;
+  width: var(--thumb-w, 0px);
+  transform: translateX(var(--thumb-x, 0px));
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--fg) 8%, transparent);
+  opacity: 0;
+  transition: transform 0.24s var(--ease), width 0.24s var(--ease);
+}
+.theme-toggle.has-thumb::before, .seg.has-thumb::before { opacity: 1; }
+.theme-toggle:not(.has-thumb)::before, .seg:not(.has-thumb)::before { transition: none; }
+.theme-toggle:not(.has-thumb) button.on, .seg:not(.has-thumb) button.on { background: var(--card); }
 
 /* ------------------------------------------------------------------ body */
 
@@ -1014,3 +1052,231 @@ input::placeholder, textarea::placeholder { color: var(--fg-muted); }
   /* A screen title and its primary action stop fighting for one line. */
   .head .actions { width: 100%; }
 }
+
+
+/* ------------------------------------------------------------------ 7. Stock (HYPERUN-STOCK) */
+
+/* THE THEME CHANGE FADES INSTEAD OF SNAPPING. For a quarter of a second after the toggle is
+   used, every surface eases its colours to the new theme (setTheme adds and removes the class).
+   Only for that moment: a permanent `transition` on every element would make every hover in a
+   long jobs table animate. The global reduced-motion rule above turns it off with the rest. */
+html.theming, html.theming *, html.theming *::before, html.theming *::after {
+  transition: background-color 0.24s var(--ease), color 0.24s var(--ease),
+              border-color 0.24s var(--ease), fill 0.24s var(--ease),
+              transform 0.24s var(--ease), width 0.24s var(--ease) !important;
+}
+
+/* A segmented control in the page body, the same thumb as the theme toggle at shadcn's
+   tabs size (20.4): 32px tall with a 3px inset. */
+.seg {
+  --thumb-inset: 3px;
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.seg::before { border-radius: var(--radius-md); }
+.seg button {
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1;
+  height: 24px;
+  min-width: 40px;
+  padding: 0 var(--sp-2);
+  color: var(--fg-muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color 0.16s var(--ease);
+}
+.seg button:hover { color: var(--fg); }
+.seg button.on { color: var(--primary); }
+
+/* A switch, for a setting that is on or off. role="switch" on the whole row, so the words are
+   part of the target and the accessible name. The knob slides; the track fills. */
+.switch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--fg);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.switch {
+  position: relative;
+  flex: none;
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--input);
+  transition: background-color 0.2s var(--ease), box-shadow 0.16s var(--ease);
+}
+.switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+  transition: transform 0.2s var(--ease);
+}
+.switch-row[aria-checked="true"] .switch { background: var(--primary); }
+.switch-row[aria-checked="true"] .switch i { transform: translateX(14px); }
+.switch-row:focus-visible { outline: none; box-shadow: none; }
+.switch-row:focus-visible .switch { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 45%, transparent); }
+
+/* The page's freshness, as one pill: a dot that breathes while the catalog is live and turns
+   amber, still, when it is stale. The breathing is the one animation on this screen and it says
+   something -- "this is current" -- so it stops the moment that stops being true. */
+.fresh {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.fresh b { color: var(--fg); font-family: var(--mono); font-weight: 500; }
+.live-dot { position: relative; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: live-dot 2.4s var(--ease) infinite;
+}
+.live-dot.stale { background: var(--run); }
+.live-dot.stale::after { animation: none; }
+@keyframes live-dot {
+  0% { transform: scale(1); opacity: 0.55; }
+  70%, 100% { transform: scale(2.8); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .live-dot::after { animation: none; } }
+
+.stock-filters { gap: var(--sp-3); }
+.stock-filters .frow { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.stock-filters .frow .spacer { flex: 1; }
+.flabel {
+  flex: 0 0 148px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--fg-muted);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.flabel small { font-size: var(--text-xs); font-weight: 400; letter-spacing: 0; text-transform: none; }
+
+.chips { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; gap: var(--sp-2); }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 var(--sp-3);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 0.16s var(--ease), border-color 0.16s var(--ease), color 0.16s var(--ease);
+}
+.chip:hover { background: var(--bg); border-color: color-mix(in srgb, var(--fg) 22%, var(--border)); }
+.chip .n { font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-muted); }
+.chip[aria-pressed="true"] { color: var(--primary); background: var(--primary-soft); border-color: var(--primary); }
+.chip[aria-pressed="true"] .n { color: var(--primary); }
+.chip.zero { color: var(--fg-muted); }
+.chip.more { color: var(--fg-muted); border-style: dashed; }
+
+/* The board: one card per vendor, the vendors with stock first. */
+.stock-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: var(--sp-4); align-items: start; }
+.vcard {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+.vcard:hover {
+  border-color: color-mix(in srgb, var(--fg) 16%, var(--border));
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--fg) 6%, transparent),
+              0 6px 20px color-mix(in srgb, var(--fg) 5%, transparent);
+}
+/* A div, not a <header>: the page's <header> rule makes every header a 56px sticky bar. */
+.vcard .vhead { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3) var(--sp-4); }
+.vcard .vtitle { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+.vcard .vtitle .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vcard .vtitle .id { font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-muted); }
+.vcard .vtitle .count { margin-left: auto; font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; }
+.vcard .vtitle .count b { color: var(--ok); font-weight: 600; }
+.vcard.none .vtitle .count b { color: var(--fg-muted); }
+/* Every region of the vendor as one small square, the way a status page draws its days: the
+   whole vendor at a glance before any row is read. Decorative to a screen reader, because the
+   rows below say the same thing in words. */
+.vstrip { display: flex; flex-wrap: wrap; gap: 3px; }
+.vstrip i { width: 10px; height: 10px; border-radius: 3px; background: var(--wait-soft); box-shadow: inset 0 0 0 1px var(--border); }
+.vstrip i.ok { background: var(--ok); box-shadow: none; }
+
+.srow {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+.srow .where { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
+.srow .where b { font-size: var(--text-sm); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow .where span { font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-muted); }
+.srow.out .where b { color: var(--fg-muted); font-weight: 400; }
+.srow .shapes { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.shape {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.shape i { margin-left: 4px; font-style: normal; color: var(--fg-muted); }
+.stock-board .empty { grid-column: 1 / -1; border: 1px dashed var(--border); border-radius: var(--radius-xl); }
+.stock-board .empty svg { color: var(--fg-muted); }
+
+/* Alerts: a form on one line and a list under it. */
+.stock-alert-form { display: flex; align-items: flex-end; gap: var(--sp-3); flex-wrap: wrap; }
+.stock-alert-form label { flex: 0 1 180px; }
+.alist { display: flex; flex-direction: column; }
+.arow { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-3) 0; border-top: 1px solid var(--border); }
+.arow .what { font-weight: 500; }
+.arow .spacer { flex: 1; }
+
+@media (max-width: 720px) {
+  .flabel { flex-basis: 100%; }
+  .stock-board { grid-template-columns: 1fr; }
+  .stock-alert-form label { flex-basis: 100%; }
+}
+
