@@ -371,6 +371,21 @@ def test_a_failed_dm_is_not_recorded_and_is_sent_next_pass(core, watcher):
     assert watcher() == 1
 
 
+def test_a_dm_slack_refuses_for_its_blocks_goes_as_text(core, watcher):
+    store(core, stock.new_alert({"gpu": "H100", "gpus": 8}, "lab-alice", "alice", NOW))
+    tries = []
+
+    def refuses_blocks(slack_id, text, token, blocks=None):
+        tries.append(blocks is not None)
+        return blocks is None
+    watcher.sent.clear()
+    cluster = k8s.Cluster(None, core)
+    core.put(stock.CATALOG_CONFIGMAP, {stock.CATALOG_KEY: json.dumps(h100_in_montreal())})
+    assert stockwatch.run_once(cluster, "xoxb-test", "", send=refuses_blocks, now=NOW) == 1
+    assert tries == [True, False], "blocks first, then the text alone"
+    assert core.alerts()[0]["state"]["notified_at"]
+
+
 def test_an_owner_without_a_slack_id_is_never_messaged(core, watcher):
     store(core, stock.new_alert({"gpu": "H100", "gpus": 8}, "lab-alice", "carol", NOW))
     assert watcher(h100_in_montreal()) == 0 and watcher.sent == []
