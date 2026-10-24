@@ -283,6 +283,25 @@ nav button.on { background: var(--primary-soft); color: var(--primary); }
 .who .whoami b { color: var(--fg); font-weight: 600; font-size: var(--text-xs); }
 .who .whoami span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* HYPERUN-HEADER-ROOM. WHEN THE BAR IS NARROWER THAN ITS CONTENT, THE NAV GIVES WAY.
+   Measured 2026-10-24 with the Stock tab added: brand 57px, nav 574px and the identity group
+   363px need 1114px, and below that the identity group was the thing that shrank. Its team
+   line had no overflow rule, so the text ran out of its box and under the theme toggle,
+   which then sat on top of the account name. Now the identity group keeps its size, the nav
+   shrinks and scrolls sideways inside the bar (a cut-off tab is visibly cut off, and the
+   fade says there is more), and the account lines end in an ellipsis instead of spilling. */
+.who { flex-shrink: 0; }
+.who .whoami { min-width: 0; max-width: 220px; overflow: hidden; }
+.who .whoami b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who .theme-toggle, .who #logout { flex: none; }
+header nav { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+header nav::-webkit-scrollbar { display: none; }
+header nav.fade-end { mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
+@media (max-width: 1180px) {
+  /* The email goes first, the team stays: the team is whose jobs are on screen. */
+  .who .whoami span { display: none; }
+}
+
 /* HYPERUN-THEME-TOGGLE. Three states and not two: a reader who has expressed no
    preference is NOT the same as one who chose light, and collapsing them means
    the page stops following the OS the first time anybody touches the control. */
@@ -297,15 +316,16 @@ nav button.on { background: var(--primary-soft); color: var(--primary); }
   border-radius: var(--radius-md);
 }
 .theme-toggle button {
-  font: inherit;
-  font-size: var(--text-xs);
-  font-weight: 500;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 22px;
+  padding: 0;
   color: var(--fg-muted);
   background: none;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  padding: 4px 7px;
   cursor: pointer;
   transition: color 0.16s var(--ease);
 }
@@ -1266,9 +1286,35 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
 .stock-board .empty { grid-column: 1 / -1; border: 1px dashed var(--border); border-radius: var(--radius-xl); }
 .stock-board .empty svg { color: var(--fg-muted); }
 
-/* Alerts: a form on one line and a list under it. */
-.stock-alert-form { display: flex; align-items: flex-end; gap: var(--sp-3); flex-wrap: wrap; }
-.stock-alert-form label { flex: 0 1 180px; }
+/* Alerts: the form reads as one sentence, and the list sits under it. */
+.panel > header.stack { flex-direction: column; align-items: flex-start; gap: var(--sp-1); }
+.stock-alert-form { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.aword { font-size: var(--text-sm); color: var(--fg-muted); white-space: nowrap; }
+/* A select in the design system's shape: no native arrow, a chevron drawn in the muted ink
+   instead, so the three selects match the chips and the segmented control above them. */
+.select { position: relative; display: inline-flex; }
+.select select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: auto;
+  min-width: 128px;
+  padding: 0 32px 0 12px;
+  cursor: pointer;
+  transition: border-color 0.16s var(--ease), background-color 0.16s var(--ease);
+}
+.select select:hover { border-color: color-mix(in srgb, var(--fg) 45%, var(--input)); }
+.select::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--fg-muted);
+  border-bottom: 1.5px solid var(--fg-muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
 .alist { display: flex; flex-direction: column; }
 .arow { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: var(--sp-3) 0; border-top: 1px solid var(--border); }
 .arow .what { font-weight: 500; }
@@ -1277,6 +1323,6 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
 @media (max-width: 720px) {
   .flabel { flex-basis: 100%; }
   .stock-board { grid-template-columns: 1fr; }
-  .stock-alert-form label { flex-basis: 100%; }
+  .stock-alert-form .select, .stock-alert-form .select select { width: 100%; }
 }
 

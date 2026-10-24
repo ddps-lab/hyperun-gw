@@ -95,9 +95,13 @@
          touches the control. app.js writes localStorage `hyperun.theme` and the
          <script> in <head> reads it back before the first paint. -->
     <div class="theme-toggle" id="theme" role="group" aria-label="Colour theme">
-      <button data-theme-set="light" title="Light">Light</button>
-      <button data-theme-set="dark" title="Dark">Dark</button>
-      <button data-theme-set="system" title="Follow the system setting">Auto</button>
+      <!-- HYPERUN-HEADER-ROOM. Icons, not words: the three words took 137px of a bar that
+           has none to spare since the Stock tab, and a sun, a moon and a screen are the
+           common spelling of this control. Each button still says its name to a screen
+           reader and on hover. -->
+      <button data-theme-set="light" title="Light" aria-label="Light"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></button>
+      <button data-theme-set="dark" title="Dark" aria-label="Dark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></button>
+      <button data-theme-set="system" title="Follow the system setting" aria-label="Follow the system setting"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
     </div>
     <button class="flat tiny" id="logout">Sign out</button>
   </div>
@@ -1080,18 +1084,22 @@
   <!-- Shown only when GET /v1/stock/alerts answers 200, i.e. for a namespace the operator listed
        in the hyperun-stock-alerts ConfigMap. Everyone else never sees an Alerts panel. -->
   <div class="panel" id="stock-alerts" hidden>
-    <header>
+    <header class="stack">
       <h2>Alerts</h2>
-      <span class="dim small">A Slack DM with a link back here when a GPU goes from no stock to stock,
-        checked every 10 minutes. Nothing is rented.</span>
+      <p class="dim small">A Slack DM with a link back here when a GPU comes back into stock.
+        Checked every 10 minutes; nothing is rented.</p>
     </header>
+    <!-- The form reads as the sentence it asks: "Notify me when A100 80GB x4 is in stock at
+         any vendor". Each select carries its own name for a screen reader. -->
     <form class="stock-alert-form" id="stock-alert-form">
-      <label>GPU<select id="stock-a-gpu"></select></label>
-      <label>GPUs per machine<select id="stock-a-count">
-        <option value="">Any</option><option value="1">1</option><option value="2">2</option>
-        <option value="4">4</option><option value="8">8</option>
-      </select></label>
-      <label>Vendor<select id="stock-a-vendor"></select></label>
+      <span class="aword">Notify me when</span>
+      <span class="select"><select id="stock-a-gpu" aria-label="GPU"></select></span>
+      <span class="select"><select id="stock-a-count" aria-label="GPUs per machine">
+        <option value="">any count</option><option value="1">×1</option><option value="2">×2</option>
+        <option value="4">×4</option><option value="8">×8</option>
+      </select></span>
+      <span class="aword">is in stock at</span>
+      <span class="select"><select id="stock-a-vendor" aria-label="Vendor"></select></span>
       <button class="go" type="submit">Add alert</button>
     </form>
     <div id="stock-alert-msg"></div>
