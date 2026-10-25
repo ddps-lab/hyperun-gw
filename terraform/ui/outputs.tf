@@ -23,7 +23,7 @@ output "next_steps" {
       -var 'cors_allow_origins=["https://${aws_cloudfront_distribution.ui.domain_name}"]'
 
     # 2. Let CI publish the files.
-    gh variable set UI_BUCKET       --repo ddps-lab/pacsrun-gw --body ${aws_s3_bucket.ui.id}
-    gh variable set UI_DISTRIBUTION --repo ddps-lab/pacsrun-gw --body ${aws_cloudfront_distribution.ui.id}
+    gh variable set UI_BUCKET       --repo ddps-lab/hyperun-gw --body ${aws_s3_bucket.ui.id}
+    gh variable set UI_DISTRIBUTION --repo ddps-lab/hyperun-gw --body ${aws_cloudfront_distribution.ui.id}
   EOT
 }

@@ -13,6 +13,7 @@ build/
 
 # terraform
 terraform.tfvars
+hyperun.tfvars
 .terraform/
 *.tfstate
 *.tfstate.backup

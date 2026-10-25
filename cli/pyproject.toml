@@ -87,9 +87,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ddps-lab/pacsrun-gw"
-Repository = "https://github.com/ddps-lab/pacsrun-gw"
-Issues = "https://github.com/ddps-lab/pacsrun-gw/issues"
+Homepage = "https://github.com/ddps-lab/hyperun-gw"
+Repository = "https://github.com/ddps-lab/hyperun-gw"
+Issues = "https://github.com/ddps-lab/hyperun-gw/issues"
 
 [project.scripts]
 hyperun = "hyperun.cli:main"

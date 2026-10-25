@@ -2,7 +2,7 @@
 //
 // END-TO-END FLOW of one release:
 //
-//   1. A push to pacsrun-gw runs `.github/workflows/release.yml`.
+//   1. A push to hyperun-gw runs `.github/workflows/release.yml`.
 //   2. The job asks GitHub for an OIDC token. Its `sub` claim names this repository.
 //   3. It calls sts:AssumeRoleWithWebIdentity against `aws_iam_role.github_actions` below.
 //      The trust policy checks `sub`, which is THE control that stops any other repository

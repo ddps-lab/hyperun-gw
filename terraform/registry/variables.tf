@@ -23,7 +23,7 @@ variable "name_prefix" {
 
 variable "ecr_repository_name" {
   description = <<-EOT
-    Name of the ECR repository the gateway image is pushed to. It goes in the pacsrun-gw
+    Name of the ECR repository the gateway image is pushed to. It goes in the hyperun-gw
     repository's ECR_REPOSITORY variable verbatim, and a mismatch fails the release workflow at
     the push step with a message naming a repository that does not exist.
   EOT
@@ -56,7 +56,7 @@ variable "github_repository" {
     "Not authorized to perform sts:AssumeRoleWithWebIdentity".
   EOT
   type        = string
-  default     = "pacsrun-gw"
+  default     = "hyperun-gw"
 }
 
 variable "github_org_id" {
@@ -66,11 +66,11 @@ variable "github_org_id" {
     ONLY needed when the organization has enabled ID-based OIDC subject claims, i.e. when the
     token's `sub` looks like
 
-      repo:ddps-lab@28432465/pacsrun-gw@1352229254:ref:refs/heads/main
+      repo:ddps-lab@28432465/hyperun-gw@1352229254:ref:refs/heads/main
 
     rather than
 
-      repo:ddps-lab/pacsrun-gw:ref:refs/heads/main
+      repo:ddps-lab/hyperun-gw:ref:refs/heads/main
 
     PACSrun's own role carries both forms, which is evidence this organization emits the id
     form at least sometimes, so both are accepted here too. Accepting an extra form the

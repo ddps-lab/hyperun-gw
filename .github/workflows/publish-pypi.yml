@@ -26,13 +26,17 @@
 #
 #	PyPI project name   hyperun
 #	Owner               ddps-lab
-#	Repository name     pacsrun-gw
+#	Repository name     hyperun-gw
 #	Workflow filename   publish-pypi.yml
 #	Environment name    pypi
 #
+# ★ THE REPOSITORY WAS RENAMED pacsrun-gw -> hyperun-gw ON 2026-10-25. The OIDC token names the
+# repository by its CURRENT name, so the publisher entry on pypi.org has to say hyperun-gw; an
+# entry that still says pacsrun-gw rejects the upload as an untrusted publisher.
+#
 # THE PyPI PROJECT AND THE REPOSITORY HAVE DIFFERENT NAMES, and that is fine and worth stating so
 # nobody "fixes" it. The package a user installs is `hyperun`; the repository it is built from is
-# `pacsrun-gw`, which also holds the server, the terraform and the docs. PyPI's trusted publisher
+# `hyperun-gw`, which also holds the server, the terraform and the docs. PyPI's trusted publisher
 # form asks for both separately and does not require them to match.
 #
 # For a project that does not exist on PyPI yet, use the "pending publisher" form at

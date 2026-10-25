@@ -1,0 +1,22 @@
+// Values for the `hyperun` workspace, the one that holds the live CI role
+// (hyperun-gw-github-actions) and the ECR repository hyperun/gateway.
+//
+// Pass this file on every plan and apply in that workspace:
+//   terraform workspace select hyperun
+//   terraform plan -var-file=hyperun.tfvars
+//
+// WHY IT IS NOT OPTIONAL. terraform.tfvars is read in every workspace, and the variable defaults
+// are the old Lambda deployment's (variables.tf).
+// A plan in this workspace without this file REPLACES the CI role under the default prefix's
+// name, which leaves AWS_ROLE_ARN pointing at a role that no longer exists.
+// Seen on 2026-10-25: "aws_iam_role.github_actions must be replaced". With this file the same
+// change is an in-place update of the trust policy.
+//
+// Copy to hyperun.tfvars (gitignored) and fill in the two placeholders.
+name_prefix          = "hyperun-gw"
+ecr_repository_name  = "hyperun/gateway"
+ui_bucket_name       = "ddpsrun-ui-<ACCOUNT_ID>"
+ui_distribution_id   = "<CLOUDFRONT_DISTRIBUTION_ID>"
+eks_cluster_name     = "hyperun"
+lambda_function_name = ""
+github_repository    = "hyperun-gw"
