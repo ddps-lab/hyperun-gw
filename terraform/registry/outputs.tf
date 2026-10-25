@@ -1,7 +1,7 @@
 // What to do with this module's results.
 //
 // The three repository variables below are the whole handover: paste them into
-// pacsrun-gw's Settings -> Secrets and variables -> Actions -> Variables, and the release
+// hyperun-gw's Settings -> Secrets and variables -> Actions -> Variables, and the release
 // workflow can push. Nothing here is a credential — they are identifiers that appear in the
 // trust policy as restrictions.
 

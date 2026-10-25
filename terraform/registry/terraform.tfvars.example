@@ -8,7 +8,7 @@
 
 region            = "us-west-2"
 github_owner      = "ddps-lab"
-github_repository = "pacsrun-gw"
+github_repository = "hyperun-gw"
 
 // REQUIRED. The account already has this provider; this module does not create one.
 //   aws iam list-open-id-connect-providers

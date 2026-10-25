@@ -97,7 +97,7 @@ five steps: read what the deployment allows, read your repository against the sc
 estimate rather than assume, validate and stop on a finding, and submit only after you approve.
 
 ```
-/plugin marketplace add ddps-lab/pacsrun-gw
+/plugin marketplace add ddps-lab/hyperun-gw
 /plugin install hyperun
 ```
 
