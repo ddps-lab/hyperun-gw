@@ -4,7 +4,8 @@ HYPERUN-SERVING. WHAT IT PINS, against test_routes.FakeCluster (whose serving me
 k8s.Cluster's branches; tests/test_k8s.py drives the real ones):
   1. POST /v1/servings writes the contract's object: owner label, spec.model with the preset's
      numbers or the fetched config, the two token defaults, the budget as a decimal string, the
-     placement filled in, and hfTokenSecret as a secretKeyRef into hyperun-user-secrets.
+     placement filled in, the job's ServiceAccount (HYPERUN-SERVING-SA), and hfTokenSecret as a
+     secretKeyRef into hyperun-user-secrets.
   2. Every problem with a request is named at once and nothing is created; a name clash is 409.
   3. The view carries the ranked plans with score, the chosen plan with its stages, the catalog,
      the endpoint PATH (never the upstream address or the Secret's name) and a billing sentence.
@@ -87,6 +88,12 @@ def test_a_preset_serving_becomes_the_contracts_object(client, cluster):
     # A decimal string, as PACSrun's API carries no floats.
     assert spec["hourlyBudget"] == "3.0"
     assert spec["placement"] == {"regions": ["shadeform"], "capacityType": "on-demand"}
+    # HYPERUN-SERVING-SA. The ServiceAccount a job gets, which the EC2 role trusts in each tenant
+    # namespace. Without it the driver pods run as `default` and every multi-VM plan fails at
+    # sts:AssumeRoleWithWebIdentity (2026-10-25). The test app leaves HYPERUN_SERVICE_ACCOUNT
+    # unset, so this is the setting's default.
+    assert spec["serviceAccountName"] == client.app.state.settings.service_account
+    assert spec["serviceAccountName"] == "hyperunjob-writer"
     assert "hfTokenSecret" not in spec and "maxSpendUSD" not in spec
     view = response.json()
     assert view["endpoint"] == {"path": "/v1/servings/lab-alice/chat-8b/v1", "ready": False}
