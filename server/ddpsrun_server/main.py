@@ -2537,7 +2537,10 @@ def create_serving(body: ServingRequest, request: Request,
         model_spec = servings.resolve_model(body, token)
     except modelconfig.ModelConfigError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
-    obj = servings.to_hyperserving(body, principal, model_spec)
+    # HYPERUN-SERVING-SA. The same ServiceAccount a job gets, so a multi-VM plan's driver pods
+    # can assume the EC2 role for their k3s server (servings.to_hyperserving says why).
+    obj = servings.to_hyperserving(body, principal, model_spec,
+                                   request.app.state.settings.service_account)
     try:
         created = cluster.create_serving(principal.namespace, obj)
     except Conflict:

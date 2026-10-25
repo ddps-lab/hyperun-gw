@@ -19,7 +19,8 @@ END-TO-END FLOW of one `POST /v1/servings` (main.create_serving):
      from modelconfig.PRESETS, a caller's config block checked, or config.json fetched and
      mapped (modelconfig.lookup).
   4. `to_hyperserving()` builds the object: name and namespace, the owner label the owner gate
-     reads, and the spec with the placement a serving needs filled in (on-demand, [shadeform]).
+     reads, and the spec with the placement a serving needs filled in (on-demand, [shadeform])
+     and the ServiceAccount the EC2 role trusts (HYPERUN-SERVING-SA).
   5. `ServingView.from_object()` goes the other way for every read: plans, the chosen plan with
      its stages, the catalog, the endpoint path, and the billing sentence.
 
@@ -279,13 +280,22 @@ def resolve_model(body: ServingRequest, token: str | None,
 
 
 def to_hyperserving(body: ServingRequest, principal: Principal,
-                    model_spec: dict[str, Any]) -> dict[str, Any]:
+                    model_spec: dict[str, Any], service_account: str) -> dict[str, Any]:
     """Step 4: the HyperServing object to create in the caller's namespace.
 
     WHAT THE SERVER FILLS AND THE CALLER CANNOT: the namespace (from the token), the owner label
-    (HYPERUN-OWNER-GATE reads it, so a namespace-mate cannot read this serving's API key), and
-    the placement. A serving's plans are Shadeform on-demand machines, as a serving job's are
-    (models.SERVING_VENDOR / SERVING_CAPACITY), so nothing about placement is offered.
+    (HYPERUN-OWNER-GATE reads it, so a namespace-mate cannot read this serving's API key), the
+    placement, and the ServiceAccount. A serving's plans are Shadeform on-demand machines, as a
+    serving job's are (models.SERVING_VENDOR / SERVING_CAPACITY), so nothing about placement is
+    offered.
+
+    `service_account` is Settings.service_account, the one a job gets too (models.py,
+    HYPERUN-WORKLOAD-SA). HYPERUN-SERVING-SA: a plan of two or more VMs rents its k3s server on
+    EC2, and the EC2 role trusts exactly that ServiceAccount in each tenant namespace. Left out,
+    the driver pods ran as `default` and every multi-VM plan died in about 9 s with "Not
+    authorized to perform sts:AssumeRoleWithWebIdentity" (exit 35, nothing rented); after three
+    tries of each, the operator rented the first ONE-VM plan instead, with no warning
+    (serving qwen3-32b-demo, 2026-10-25, four two-VM plans in 111 s).
     """
     spec: dict[str, Any] = {
         "model": model_spec,
@@ -294,6 +304,7 @@ def to_hyperserving(body: ServingRequest, principal: Principal,
         # Decimal strings: PACSrun's API carries no floats (models.decimal_text says why).
         "hourlyBudget": decimal_text(body.hourly_budget),
         "placement": {"regions": [SERVING_VENDOR], "capacityType": SERVING_CAPACITY},
+        "serviceAccountName": service_account,
     }
     if body.max_spend_usd is not None:
         spec["maxSpendUSD"] = decimal_text(body.max_spend_usd)
