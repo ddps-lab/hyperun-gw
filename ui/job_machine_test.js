@@ -70,8 +70,8 @@ check(/fact\("Instance",\s*instanceText\(job\)/.test(SRC),
   "the job page has an Instance line");
 check(/\.\.\.\(job\.gpu_count\s*\?\s*\[fact\("GPU",\s*gpuText\(job, true\)/.test(SRC),
   "the job page draws the GPU line only when the job asked for a GPU");
-check(/jobsTable\(running\.slice\(0, 5\), \["name", "status", "elapsed", "instance"\]\)/.test(SRC),
-  "Home's running list shows the machine");
+check(/\["server", instanceText\(live\)\]/.test(SRC),
+  "Home's running job shows the machine");
 check(/"elapsed", "instance", "gpu", "vendor"/.test(SRC),
   "the Jobs table has an Instance column and a GPU column");
 

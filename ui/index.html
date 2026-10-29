@@ -67,16 +67,16 @@
        and they are the two a person actually looks at. The localStorage keys in app.js
        (`ddpsrun.server`, `ddpsrun.token`) are NOT renamed with them: those are live state in
        somebody's browser, and changing a key signs every token user out. -->
-  <div class="brand">hype<span>run</span></div>
+  <div class="brand"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--primary)"/><path d="M10.5 8.5v15M21.5 8.5v15M10.5 16h11" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/></svg><b>hype<span>run</span></b></div>
   <nav>
-    <button data-view="home" class="on">Home</button>
-    <button data-view="jobs">Jobs</button>
-    <button data-view="submit">Submit</button>
-    <button data-view="servings">Servings</button>
-    <button data-view="scripts">Scripts</button>
-    <button data-view="team">Team</button>
-    <button data-view="vendors">Vendors</button>
-    <button data-view="stock">Stock</button>
+    <button data-view="home" class="on"><i data-lucide="house"></i>Home</button>
+    <button data-view="jobs"><i data-lucide="list-checks"></i>Jobs</button>
+    <button data-view="submit"><i data-lucide="circle-plus"></i>Submit</button>
+    <button data-view="servings"><i data-lucide="server"></i>Servings</button>
+    <button data-view="scripts"><i data-lucide="file-code-2"></i>Scripts</button>
+    <button data-view="team"><i data-lucide="users"></i>Team</button>
+    <button data-view="vendors"><i data-lucide="cloud"></i>Vendors</button>
+    <button data-view="stock"><i data-lucide="package"></i>Stock</button>
   </nav>
   <div class="spacer"></div>
   <div class="who">
@@ -200,9 +200,23 @@
 
   <div class="cards" id="home-cards"></div>
 
-  <div class="panel">
-    <header><h2>Active jobs</h2><span class="dim small" id="home-running-note"></span></header>
-    <div id="home-running"></div>
+  <!-- Overview: the job that is running now with its live log on the left, the latest price
+       comparison and the recent jobs with their cost on the right. -->
+  <div class="ov">
+    <div class="panel ov-run" id="ov-run">
+      <header><h2><span class="hic"><i data-lucide="play"></i></span>Running now</h2><span class="dim small" id="home-running-note"></span></header>
+      <div id="home-running"></div>
+    </div>
+    <div class="ov-side">
+      <div class="panel ov-quote" id="ov-quote" hidden>
+        <header><h2><span class="hic"><i data-lucide="scale"></i></span>Latest quote</h2><span class="dim small" id="ov-quote-name"></span></header>
+        <div id="ov-quote-body"></div>
+      </div>
+      <div class="panel ov-recent">
+        <header><h2><span class="hic"><i data-lucide="history"></i></span>Recent jobs</h2><span class="spacer"></span><a class="small" href="#/jobs">All jobs<i data-lucide="arrow-right"></i></a></header>
+        <div id="ov-recent"></div>
+      </div>
+    </div>
   </div>
 
   <!-- HYPERUN-GETTING-STARTED. EVERY LINE HERE IS A COMMAND SOMEBODY WILL COPY, so a line that
@@ -1108,6 +1122,7 @@
 </section>
 
 </main>
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
