@@ -354,25 +354,114 @@ function drawHome() {
     const doneToday = jobs.filter((j) => j.phase === "Succeeded" && isToday(j)).length;
     const failToday = jobs.filter((j) => j.phase === "Failed" && isToday(j)).length;
 
-    // caller_cost_usd is computed on the server (the screen decides nothing):
-    // the caller's own member row and nothing else. It used to fold in the
-    // ownerless bucket for an operator, which made "My spend" read the whole
-    // team total — see StatsResponse.caller_cost_usd.
-    $("home-cards").innerHTML = [
-      card("Active", running.length, running.length ? "run" : ""),
-      card("Finished today", doneToday, doneToday ? "ok" : ""),
-      card("Failed today", failToday, failToday ? "bad" : ""),
-      card("My spend", stats ? "$" + (stats.caller_cost_usd || 0).toFixed(2) : "-"),
-      card("Team spend", stats ? "$" + stats.cost_usd.toFixed(2) : "-"),
-    ].join("");
+    // The jobs as one card laid out like Team spend: a label, then each count with its word,
+    // marked the way a status badge is.
+    const tally = (label, n, cls) =>
+      `<span class="tally"><span class="value${n ? "" : " zero"}">${n}</span>` +
+      `<span class="tally-word"><i class="dot ${cls}"></i>${esc(label)}</span></span>`;
+    $("home-cards").innerHTML =
+      `<div class="card tallies"><span class="label">Jobs</span><div class="tally-row">` +
+      `${tally("Active", running.length, "run")}${tally("Finished today", doneToday, "ok")}` +
+      `${tally("Failed today", failToday, "bad")}</div></div>` +
+      spendCard(stats);
 
-    $("home-running-note").textContent = running.length ? `${running.length} running` : "";
-    $("home-running").innerHTML = running.length
-      ? jobsTable(running.slice(0, 5), ["name", "status", "elapsed", "instance"])
-      : empty("Nothing is running right now.", "New job", "submit");
-    wireRows($("home-running"));
+    // Running now: the first running job, what it runs on, and the tail of its log.
+    const live = running.find((j) => j.phase === "Running") || running[0];
+    if (live) {
+      const key = live.job_id || live.name;
+      const chips = [
+        ["cpu", gpuText(live, false)], ["server", instanceText(live)],
+        ["timer", span(live.started_at, null)],
+      ].filter(([, t]) => t);
+      $("home-running").innerHTML =
+        `<div class="ov-job">` +
+        `<div class="ov-job-head"><span class="ov-job-name">${esc(live.name)}</span>${badge(live.phase)}` +
+        `<span class="spacer"></span>` +
+        (live.cost_usd == null ? "" : `<span class="ov-cost"><small>so far</small>$${Number(live.cost_usd).toFixed(2)}</span>`) +
+        `</div>` +
+        `<div class="ov-tags">${live.vendor ? `<span class="ov-tag">${vendorLabel(live.vendor)}</span>` : ""}` +
+        `${chips.map(([i, t]) => `<span class="ov-tag"><i data-lucide="${i}"></i>${esc(t)}</span>`).join("")}</div>` +
+        `<div class="ov-result"><span class="k">Result</span><span class="mono">${esc(live.result_path || "-")}</span></div>` +
+        `</div>` +
+        `<div class="ov-gpu" id="ov-gpu" hidden></div>` +
+        `<div class="ov-log-head">Live log<span class="live-dot"></span></div>` +
+        `<pre class="log ov-log" id="ov-log">Waiting for output.</pre>`;
+      $("home-running").querySelector(".ov-job").onclick = () => go("jobs", key);
+      call(`/v1/jobs/${key}/logs?window_seconds=0&max_lines=10000`).then((r) => {
+        const lines = (r.lines || []).slice(-6);
+        if (lines.length) $("ov-log").innerHTML = lines.map((l) => `<div>${logLine(l)}</div>`).join("");
+      }).catch(() => {});
+      call(`/v1/jobs/${key}/metrics`).then((m) => {
+        const series = m.gpu_series || [];
+        if (!series.length) return;
+        $("ov-gpu").innerHTML = gpuArea(series, m.latest_gpu || series[series.length - 1]);
+        $("ov-gpu").hidden = false;
+      }).catch(() => {});
+    } else {
+      $("home-running").innerHTML = empty("Nothing is running right now.", "New job", "submit");
+    }
+
+    // Latest quote: the newest Compared job, drawn as the compare panel draws it.
+    const quote = jobs.find((j) => j.phase === "Compared");
+    $("ov-quote").hidden = !quote;
+    if (quote) {
+      $("ov-quote-name").textContent = quote.name;
+      $("ov-quote-body").innerHTML = quotesHtml(parseCompare(quote.message));
+    }
+
+    // Recent jobs with what each one cost.
+    $("ov-recent").innerHTML = jobsTable(jobs.slice(0, 6), ["name", "status", "gpu", "vendor", "cost"]);
+    wireRows($("ov-recent"));
   });
 }
+
+/* Vendors in a fixed order, each in its own brand colour and with its mark, so a vendor looks
+   the same wherever it appears. */
+const VENDOR_SLOT = { aws: 1, shadeform: 2, runpod: 3, gcp: 4 };
+const VENDOR_LOGO = { aws: "vendors/aws.png", runpod: "vendors/runpod.png", shadeform: "vendors/shadeform.svg" };
+const vendorLabel = (v) => VENDOR_LOGO[v]
+  ? `<span class="vname"><img class="vlogo" src="${VENDOR_LOGO[v]}" alt="">${esc(v)}</span>`
+  : esc(v);
+
+/* Team spend with what each vendor's share of it was, as one stacked bar. */
+function spendCard(stats) {
+  if (!stats) return card("Team spend", "-");
+  const vendors = (stats.vendors || []).filter((v) => v.cost_usd > 0)
+    .sort((a, b) => (VENDOR_SLOT[a.vendor] || 9) - (VENDOR_SLOT[b.vendor] || 9));
+  const total = vendors.reduce((n, v) => n + v.cost_usd, 0) || 1;
+  const seg = (v) => `<i class="v-${esc(v.vendor)}" style="flex:${v.cost_usd / total}" ` +
+    `title="${esc(v.vendor)} $${v.cost_usd.toFixed(2)}"></i>`;
+  const key = (v) => `<span>${vendorLabel(v.vendor)} ` +
+    `<b class="num">$${v.cost_usd.toFixed(2)}</b></span>`;
+  return `<div class="card spend"><div class="spend-top"><span class="label">Team spend</span></div>` +
+    `<div class="spend-row"><span class="value">$${stats.cost_usd.toFixed(2)}</span>` +
+    `<div class="spend-viz"><div class="stackbar">${vendors.map(seg).join("")}</div>` +
+    `<div class="spend-key">${vendors.map(key).join("")}</div></div></div></div>`;
+}
+
+/* The running job's GPU utilisation as one filled line, 0-100%, with now and the start of the
+   window under it. */
+function gpuArea(series, last) {
+  const W = 600, H = 100;
+  const pts = series.map((s, i) => [i / Math.max(1, series.length - 1) * W,
+    H - Math.max(0, Math.min(100, s.utilization_percent)) / 100 * H]);
+  const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const grid = [0, 50, 100].map((v) => `<line x1="0" x2="${W}" y1="${H - v}" y2="${H - v}" />`).join("");
+  return `<div class="ov-gpu-head"><span>GPU utilization</span>` +
+    `<span class="ov-gpu-now"><b>${last.utilization_percent}%</b></span></div>` +
+    `<div class="ov-gpu-plot"><div class="ov-gpu-y"><span>100</span><span>50</span><span>0</span></div>` +
+    `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+    `<g class="grid">${grid}</g>` +
+    `<polygon class="area" points="0,${H} ${line} ${W},${H}"/>` +
+    `<polyline class="line" points="${line}"/></svg></div>` +
+    `<div class="ov-gpu-x"><span>${esc(when(series[0].time).slice(6))}</span>` +
+    `<span>${esc(when(series[series.length - 1].time).slice(6))}</span></div>`;
+}
+
+/* One log line as markup: escaped, the timestamp dimmed, hyperun's own lines coloured. */
+const logLine = (l) => esc(l)
+  .replace(/^(\d\d:\d\d:\d\d)(\s+)/, '<span class="ts">$1</span>$2')
+  .replace(/(\[hyperun\].*)$/, '<span class="sys">$1</span>');
 
 const card = (label, value, cls = "") =>
   `<div class="card"><span class="label">${esc(label)}</span>` +
@@ -509,7 +598,7 @@ function jobsTable(jobs, columns) {
     instance: (j) => `<span class="num">${esc(instanceText(j) || "-")}</span>`,
     // A CPU job's cell is "-": the column stays, the row has no GPU.
     gpu: (j) => `<span class="num">${esc(gpuText(j, false) || "-")}</span>`,
-    vendor: (j) => esc(j.vendor || "-"),
+    vendor: (j) => (j.vendor ? vendorLabel(j.vendor) : "-"),
     recovery: (j) => j.recovery_count
       ? `<span class="num warn-ink">${j.recovery_count}</span>`
       : `<span class="dim">-</span>`,
@@ -674,10 +763,13 @@ async function drawDetail(jobId, ns = "") {
     const waitText = job.started_at ? (span(job.created_at, job.started_at) || "-")
       : done ? "not recorded"
       : (span(job.created_at, null) || "-") + " so far";
+    const compared = job.phase === "Compared";
     $("d-facts").innerHTML = [
       fact("Created", when(job.created_at)),
-      fact("Queued", waitText),
-      fact("Ran for", span(job.started_at, job.finished_at) || (done ? "not recorded" : "-")),
+      ...(compared ? [] : [
+        fact("Queued", waitText),
+        fact("Ran for", span(job.started_at, job.finished_at) || (done ? "not recorded" : "-")),
+      ]),
       // HYPERUN-INSTANCE-AND-GPU: the machine always, the GPU only for a job that
       // asked for one. A finished job that never rented anything (compare mode)
       // has no machine to name, so it reads "-" rather than "not yet known".
@@ -685,12 +777,16 @@ async function drawDetail(jobId, ns = "") {
       ...(job.gpu_count
         ? [fact("GPU", gpuText(job, true) || (done ? "-" : "not yet known"))]
         : []),
-      fact("Vendor", job.vendor || "not yet known"),
-      fact("Restarts", job.recovery_count || "none"),
+      fact("Vendor", job.vendor || (done ? "-" : "not yet known")),
+      ...(compared ? [] : [
+        fact("Cost", job.cost_usd == null ? "-"
+          : `$${Number(job.cost_usd).toFixed(2)}${done ? "" : " so far"}`),
+        fact("Restarts", job.recovery_count || "none"),
+      ]),
       // Same fallback as the list: no owner label means it was applied with
       // kubectl, which only an operator can do.
       fact("Submitted by", job.user || "kubectl"),
-      fact("Result", job.result_path || "-"),
+      fact("Result", job.result_path || "-").replace('class="fact"', 'class="fact wide"'),
     ].join("");
 
     drawCompare(job);
@@ -1395,7 +1491,8 @@ async function drawLog(jobId) {
   const lines = r.lines || [];
   if (lines.length) {
     logText += (logText ? "\n" : "") + lines.join("\n");
-    $("d-log").textContent = logText;
+    // Escaped first, then the timestamp and hyperun's own lines get a colour.
+    $("d-log").innerHTML = logText.split("\n").map(logLine).join("\n");
     $("d-log").scrollTop = $("d-log").scrollHeight;
   } else if (!logText) {
     $("d-log").textContent = "No output yet.";
@@ -1446,6 +1543,30 @@ function parseCompare(message) {
   };
 }
 
+/* Winner and runner-up as two cards, the price first; price gap and candidates beside them.
+   Shared by the compare panel and the overview's Latest quote. */
+function quotesHtml(c) {
+  const offer = (text) => {
+    const m = String(text).match(/^(\S+)\s+(\$[\d.]+)\/hr\s*(.*)$/);
+    return m ? { vendor: m[1], price: m[2], rest: m[3] } : null;
+  };
+  const card = (label, text, cls) => {
+    const o = offer(text);
+    if (!o) return fact(label, text);
+    return `<div class="quote ${cls}"><span class="k">${esc(label)}</span>` +
+      `<span class="vendor">${vendorLabel(o.vendor)}</span>` +
+      `<span class="price">${esc(o.price)}<small>/hr</small></span>` +
+      (o.rest && !/^buys 1 machine$/.test(o.rest) ? `<span class="rest">${esc(o.rest)}</span>` : "") + `</div>`;
+  };
+  return `<div class="quotes">` +
+    (c.winner ? card("Cheapest", c.winner, "win") : "") +
+    (c.runnerUp ? card("Runner-up", c.runnerUp, "") : "") +
+    `<div class="quote-side">` +
+    (c.margin ? `<div class="stat"><span class="k">Price gap</span><span class="big ok-ink">${esc(c.margin)}</span></div>` : "") +
+    (c.answered ? `<div class="stat"><span class="k">Candidates</span><span class="big">${esc(c.answered.replace(/\s*candidate\(?s?\)?\s*answered/i, ""))}</span><span class="rest">answered</span></div>` : "") +
+    `</div></div>`;
+}
+
 /* Show the comparison, and hide the panels a comparison has nothing to put in.
 
    THE HIDING IS HALF THE FEATURE. A Compared job never rented a machine, so Result files answers
@@ -1469,15 +1590,12 @@ function drawCompare(job) {
     ["Candidates", c.answered],
   ].filter(([, v]) => v);
 
-  $("d-compare-facts").innerHTML = rows.length
-    ? rows.map(([k, v]) => fact(k, v)).join("")
-    : "";
+  $("d-compare-facts").innerHTML = rows.length ? quotesHtml(c) : "";
   // The sentence, always, whether it parsed or not. When nothing parsed it is the only thing
   // here, which is the honest outcome for a format this panel does not own.
-  $("d-compare-raw").innerHTML = note("info",
-    rows.length
-      ? `Nothing was rented and the workload did not run. The operator's own sentence: ${c.raw}`
-      : `Nothing was rented and the workload did not run. ${c.raw}`);
+  $("d-compare-raw").innerHTML = rows.length
+    ? `<p class="dim small" title="${esc(c.raw)}">Priced only. Nothing was rented, so this comparison cost nothing.</p>`
+    : note("info", `Nothing was rented and the workload did not run. ${c.raw}`);
 }
 
 /* HYPERUN-SERVING-PLAN. The Serving plan panel: the planner's ranked rental plans for a job that
@@ -4250,3 +4368,14 @@ window.addEventListener("hashchange", route);
     showApp(false);
   }
 })();
+
+/* Icons (Lucide). Screens draw `<i data-lucide>` placeholders; this swaps them for SVGs after
+   any redraw, so no draw function has to remember to. */
+if (window.lucide) {
+  let pending = false;
+  const draw = () => { pending = false; lucide.createIcons({ attrs: { "stroke-width": 2 } }); };
+  new MutationObserver(() => {
+    if (!pending && document.querySelector("i[data-lucide]")) { pending = true; requestAnimationFrame(draw); }
+  }).observe(document.body, { childList: true, subtree: true });
+  draw();
+}

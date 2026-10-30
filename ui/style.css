@@ -63,12 +63,12 @@
 
   /* Type. Six steps and no others (20.4). 15px and 12.5px are gone; 14px is the
      body size, which is the single most visible change in this file. */
-  --text-xs: 12px;
-  --text-sm: 13px;
-  --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 28px;
+  --text-xs: 13px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --text-2xl: 30px;
 
   /* Space. Multiples of four, and nothing between them. */
   --sp-1: 4px;
@@ -92,7 +92,7 @@
      motion here says "this moved", never anything decorative. */
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 
-  --sans: "IBM Plex Sans KR", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+  --sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
           "Malgun Gothic", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -235,11 +235,13 @@ header {
 }
 
 .brand {
-  font-family: var(--mono);
-  font-weight: 600;
-  font-size: var(--text-base);
-  letter-spacing: -0.02em;
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 24px;
+  letter-spacing: -0.035em;
+  display: flex; align-items: center; gap: 10px;
 }
+.brand-mark { width: 34px; height: 34px; flex: none; }
 .brand span { color: var(--primary); }
 
 nav { display: flex; gap: var(--sp-1); }
@@ -1326,3 +1328,262 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
   .stock-alert-form .select, .stock-alert-form .select select { width: 100%; }
 }
 
+
+/* ------------------------------------------------------------------ figure polish (local) */
+
+.facts .fact.wide { grid-column: span 2; }
+.fact .v { overflow-wrap: break-word; word-break: normal; }
+
+/* Price comparison: two quote cards and the two numbers that decide. */
+.quotes { display: grid; grid-template-columns: 1fr 1fr 1.1fr; gap: var(--sp-4); align-items: stretch; }
+.quote {
+  display: flex; flex-direction: column; gap: 4px;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  padding: var(--sp-4); background: var(--card);
+}
+.quote.win { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); background: var(--primary-soft); }
+.quote .k, .stat .k { font-size: var(--text-xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+.quote.win .k { color: var(--primary); }
+.quote .vendor { font-size: var(--text-lg); font-weight: 600; }
+.quote .price { font-family: var(--mono); font-size: 28px; font-weight: 600; letter-spacing: -.02em; line-height: 1.1; }
+.quote .price small { font-size: var(--text-sm); color: var(--fg-muted); font-weight: 400; margin-left: 2px; }
+.quote .rest, .stat .rest { font-size: var(--text-sm); color: var(--fg-muted); }
+.quote-side { display: grid; grid-template-rows: 1fr 1fr; gap: var(--sp-3); }
+.stat { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap;
+        border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4); }
+.stat .k { flex-basis: 100%; }
+.stat .big { font-family: var(--mono); font-size: 22px; font-weight: 600; }
+.ok-ink { color: var(--ok); }
+#d-compare-raw p { margin: var(--sp-3) 0 0; }
+
+/* Logs: dim timestamps, hyperun's own lines in the brand colour. */
+pre.log .ts { color: var(--fg-muted); }
+pre.log .sys { color: var(--primary); font-weight: 500; }
+
+/* ------------------------------------------------------------------ overview */
+
+#view-home { gap: var(--sp-4); }
+#view-home .head p { display: none; }
+#view-home .cards { grid-template-columns: repeat(5, 1fr); gap: var(--sp-3); }
+#view-home .card { padding: var(--sp-3) var(--sp-4); border-radius: var(--radius-lg); }
+#view-home .card .value { font-size: 26px; font-weight: 600; }
+
+.ov { display: grid; grid-template-columns: 1.08fr 1fr; gap: var(--sp-4); align-items: stretch; }
+.ov-side { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.ov .panel { padding: var(--sp-4) var(--sp-5); gap: var(--sp-3); border-radius: var(--radius-lg); min-width: 0; }
+.ov .panel > header h2 { font-size: var(--text-lg); }
+.ov .panel > header .spacer { flex: 1; }
+.ov-run #home-running { display: flex; flex-direction: column; gap: var(--sp-3); flex: 1; min-height: 0; }
+
+.ov-job { display: flex; flex-direction: column; gap: var(--sp-2); cursor: pointer; }
+.ov-job-head { display: flex; align-items: center; gap: var(--sp-3); }
+.ov-job-head .spacer { flex: 1; }
+.ov-job-name { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+.ov-cost { font-family: var(--mono); font-size: 26px; font-weight: 600; display: flex; align-items: baseline; gap: 6px; }
+.ov-cost small { font-family: var(--sans); font-size: var(--text-sm); font-weight: 400; color: var(--fg-muted); }
+.ov-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.ov-tag { font-family: var(--mono); font-size: var(--text-sm); padding: 3px 10px; border-radius: 999px;
+          background: var(--wait-soft); color: var(--fg); }
+.ov-result { display: flex; gap: var(--sp-2); align-items: baseline; font-size: var(--text-sm); min-width: 0; }
+.ov-result .k { color: var(--fg-muted); flex: none; }
+.ov-result .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.ov-log-head { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--text-sm); font-weight: 600;
+               color: var(--fg-muted); text-transform: uppercase; letter-spacing: .05em; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+pre.log.ov-log { flex: 1; max-height: none; font-size: 13px; line-height: 1.7; white-space: pre; overflow: auto; background: #0f1720; color: #d6dde5; border-color: #0f1720; padding: var(--sp-3) var(--sp-4); }
+pre.log.ov-log .ts { color: #7d8a98; }
+pre.log.ov-log .sys { color: #7fb7ff; }
+
+.ov-quote .quotes { grid-template-columns: 1fr 1fr 0.95fr; gap: var(--sp-3); }
+.ov-quote .quote { padding: var(--sp-3) var(--sp-4); }
+.ov-quote .quote .price { font-size: 26px; }
+.ov-quote .quote-side { gap: var(--sp-2); }
+.ov-quote .stat { padding: var(--sp-2) var(--sp-3); gap: 0 var(--sp-2); }
+.ov-quote .stat .big { font-size: 20px; }
+
+.ov-recent table { font-size: var(--text-base); }
+.ov-recent th { padding-top: 0; }
+.ov-recent td, .ov-recent th { padding: 7px var(--sp-2); }
+.ov-recent td:last-child, .ov-recent th:last-child { text-align: right; }
+.ov-recent td:last-child .num { font-weight: 600; }
+.ov-recent .scroll { margin: 0 calc(-1 * var(--sp-2)); }
+
+pre.log.ov-log > div { overflow: hidden; text-overflow: ellipsis; }
+body:has(#view-home:not([hidden])) main { padding-top: var(--sp-5); padding-bottom: var(--sp-5); }
+#view-home h1 { font-size: 26px; }
+#view-home .head .go { height: 36px; }
+#view-home .card .label { font-size: 12px; }
+#view-home .card .value { font-size: 24px; }
+.ov-recent .scroll { box-shadow: none !important; overflow: visible; }
+.ov-recent .scroll::after, .ov-recent .scroll::before { display: none !important; }
+.ov-recent td, .ov-recent th { padding: 6px var(--sp-2); }
+.ov-recent td { font-size: 15px; }
+.ov-recent th { font-size: 12px; }
+.ov-recent .badge { font-size: 13px; }
+.ov-quote .stat .rest { font-size: 13px; }
+.ov-quote .quote .vendor { font-size: 17px; }
+.ov-recent td, .ov-recent th { padding: 6px 6px; }
+.ov-recent .scroll { margin: 0 -6px; }
+.ov-quote .stat { flex-wrap: nowrap; align-items: baseline; }
+.ov-quote .stat .k { flex-basis: auto; margin-right: auto; }
+.ov-quote .quote-side { grid-template-rows: auto auto; align-content: stretch; }
+.ov-quote .stat { flex-direction: column; align-items: flex-start; justify-content: center; gap: 2px; }
+.ov-quote .stat .rest { display: none; }
+.ov-recent { flex: 1; }
+
+/* ------------------------------------------------------------------ overview charts */
+
+:root { --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #8a96a3; }
+#view-home .cards { grid-template-columns: 1fr 1fr 1fr 2.3fr; }
+.card.spend { gap: 2px; }
+.spend-top { display: flex; justify-content: space-between; align-items: baseline; }
+.spend-row { display: flex; align-items: center; gap: var(--sp-5); }
+.spend-viz { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.stackbar { display: flex; gap: 2px; height: 12px; }
+.stackbar i { display: block; border-radius: 3px; min-width: 3px; }
+.spend-key { display: flex; gap: var(--sp-4); font-size: 13px; color: var(--fg-muted); white-space: nowrap; }
+.spend-key span { display: inline-flex; align-items: center; gap: 5px; }
+.spend-key i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.spend-key b { color: var(--fg); font-weight: 600; }
+i.s1 { background: var(--s1); } i.s2 { background: var(--s2); } i.s3 { background: var(--s3); }
+i.s4 { background: var(--s4); } i.s5 { background: var(--s5); }
+
+.ov-gpu { display: flex; flex-direction: column; gap: 4px; }
+.ov-gpu-head { display: flex; justify-content: space-between; align-items: baseline; font-size: var(--text-sm);
+               font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .05em; }
+.ov-gpu-now { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.ov-gpu-now b { color: var(--fg); font-family: var(--mono); font-size: 18px; }
+.ov-gpu-plot { display: flex; gap: 8px; height: 84px; }
+.ov-gpu-y { display: flex; flex-direction: column; justify-content: space-between; font-family: var(--mono);
+            font-size: 11px; color: var(--fg-muted); width: 24px; text-align: right; line-height: 1; }
+.ov-gpu-plot svg { flex: 1; min-width: 0; width: 0; height: 100%; overflow: visible; }
+.ov-gpu-plot .grid line { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ov-gpu-plot .area { fill: var(--primary); opacity: .12; }
+.ov-gpu-plot .line { fill: none; stroke: var(--primary); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.ov-gpu-x { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px;
+            color: var(--fg-muted); padding-left: 32px; }
+
+/* ------------------------------------------------------------------ icons */
+
+svg.lucide { width: 1em; height: 1em; flex: none; vertical-align: -0.125em; }
+nav button { display: inline-flex; align-items: center; gap: 7px; }
+nav button svg.lucide { width: 18px; height: 18px; }
+#view-home .card .label { display: inline-flex; align-items: center; gap: 6px; }
+#view-home .card .label svg.lucide { width: 15px; height: 15px; }
+.ov .panel > header h2 { display: inline-flex; align-items: center; gap: 10px; }
+.hic { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 8px;
+       background: var(--wait-soft); color: var(--fg-muted); }
+.hic svg.lucide { width: 17px; height: 17px; }
+.ov-recent header a { display: inline-flex; align-items: center; gap: 4px; text-decoration: none; font-weight: 500; }
+.ov-tag { display: inline-flex; align-items: center; gap: 6px; }
+.ov-tag svg.lucide { width: 15px; height: 15px; color: var(--fg-muted); }
+.ov-result .k { display: inline-flex; align-items: center; gap: 5px; }
+.ov-log-head svg.lucide, .ov-gpu-head svg.lucide { width: 16px; height: 16px; }
+.ov-gpu-head > span:first-child { display: inline-flex; align-items: center; gap: 6px; }
+.ov-gpu-now { display: inline-flex; align-items: center; gap: 4px; }
+.ov-gpu-now svg.lucide { width: 14px; height: 14px; margin-left: 4px; }
+.ov-log-head .live-dot { margin-left: 4px; }
+.ov-cost small { display: inline-flex; align-items: center; gap: 4px; }
+.quote .k, .stat .k { display: inline-flex; align-items: center; gap: 5px; }
+.quote .k svg.lucide, .stat .k svg.lucide { width: 14px; height: 14px; }
+nav { gap: 2px; }
+nav button { font-size: 15px; padding-left: 11px; padding-right: 11px; gap: 6px; }
+nav button svg.lucide { width: 17px; height: 17px; }
+.hic { width: 26px; height: 26px; border-radius: 7px; }
+.hic svg.lucide { width: 15px; height: 15px; }
+
+/* The overview stacks on narrow screens. */
+@media (max-width: 1180px) {
+  .ov { grid-template-columns: minmax(0, 1fr); }
+  .ov-side { min-width: 0; }
+  #view-home .cards { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+  #view-home .cards { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  #view-home .cards { grid-template-columns: minmax(0, 1fr); }
+  .spend-key { flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); }
+  .quotes, .ov-quote .quotes { grid-template-columns: minmax(0, 1fr); }
+  .ov-recent .scroll { overflow-x: auto; }
+}
+
+/* The wordmark stays "hyperun" in the markup (HYPERUN-BRAND); the top bar sets it as a title. */
+.brand b { text-transform: capitalize; font-weight: 700; }
+
+/* Hierarchy by weight and size, not capitals: labels are sentence case, numbers are set in the
+   text face with tabular figures, and the accent is kept for selection, the primary action and
+   the winning quote. Mono stays for what is copied: paths, instance names, logs. */
+.card .label, th, .quote .k, .stat .k, .ov-gpu-head, .ov-log-head {
+  text-transform: none; letter-spacing: 0;
+}
+.card .label, .quote .k, .stat .k, .ov-gpu-head, .ov-log-head { font-size: var(--text-sm); font-weight: 500; }
+th { font-size: var(--text-sm); font-weight: 500; }
+.num, td.num, .card .value, .quote .price, .stat .big, .ov-cost, .ov-gpu-now b {
+  font-family: var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
+}
+.quote.win .k { color: var(--primary); font-weight: 600; }
+.card .label svg.lucide, .quote .k svg.lucide, .stat .k svg.lucide { color: var(--fg-muted); }
+.quote.win .k svg.lucide { color: var(--primary); }
+
+/* Status is a coloured dot and the word in body ink: no tinted pill. The word carries the
+   meaning, the dot lets the eye find the running and failed rows. */
+.badge { background: none !important; color: var(--fg) !important; padding: 0; height: auto;
+         gap: 7px; font-size: inherit; font-weight: 500; border-radius: 0; }
+.badge::before { width: 8px; height: 8px; }
+.badge.ok::before   { background: var(--ok); }
+.badge.run::before  { background: var(--run); }
+.badge.bad::before  { background: var(--bad); }
+.badge.wait::before { background: var(--wait); }
+.ov-recent .badge { font-size: inherit; }
+
+/* The job counts: laid out like Team spend, a label over the numbers, each number followed by
+   its word. The numbers are in body ink; only the dots carry status colour. */
+#view-home .cards { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }
+.card.tallies { gap: 2px; }
+.tally-row { display: flex; align-items: baseline; gap: var(--sp-6); flex-wrap: wrap; }
+.tally { display: inline-flex; align-items: baseline; gap: 10px; }
+#view-home .tally .value { font-size: 34px; font-weight: 600; line-height: 1.15; color: var(--fg) !important; }
+#view-home .tally .value.zero { color: var(--fg-muted) !important; font-weight: 500; }
+.tally-word { display: inline-flex; align-items: center; gap: 7px; color: var(--fg-muted); font-size: 14px; font-weight: 500; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.run { background: var(--run); } .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+#view-home .card.spend .value { font-size: 34px; line-height: 1.15; }
+@media (max-width: 720px) {
+  .tally-row { gap: var(--sp-4); }
+  #view-home .tally .value { font-size: 28px; }
+}
+
+/* Vendor marks and brand colours. Shadeform's navy lightens in dark mode so its bar stays visible. */
+:root { --v-aws: #ff9900; --v-runpod: #5d29f0; --v-shadeform: #071b30; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --v-runpod: #8b67f5; --v-shadeform: #9fb3c8; } }
+:root[data-theme="dark"] { --v-runpod: #8b67f5; --v-shadeform: #9fb3c8; }
+.stackbar i { background: var(--s5); }
+.stackbar i.v-aws { background: var(--v-aws); }
+.stackbar i.v-runpod { background: var(--v-runpod); }
+.stackbar i.v-shadeform { background: var(--v-shadeform); }
+.vname { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.vlogo { width: 16px; height: 16px; border-radius: 4px; flex: none; }
+.quote .vendor .vlogo { width: 18px; height: 18px; border-radius: 5px; }
+
+@media (max-width: 1180px) {
+  #view-home .cards { grid-template-columns: minmax(0, 1fr); }
+}
+.vname { display: inline; white-space: nowrap; }
+.vlogo { display: inline-block; vertical-align: -3px; margin-right: 6px; }
+.quote .vendor .vlogo { vertical-align: -2px; }
+#view-home .cards { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
+.spend-key { gap: var(--sp-3); }
+.ov-recent td { font-size: 14px; }
+.ov-recent td, .ov-recent th { padding-left: 5px; padding-right: 5px; }
+@media (max-width: 1180px) {
+  #view-home .cards { grid-template-columns: minmax(0, 1fr); }
+}
+.spend-key .vname { display: inline; }
+
+/* The mark: two stems, a job and a cloud, joined by the route Hyperun picks. */
+:root { --brand-route: #7fc0ff; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --brand-route: #ffffff; } }
+:root[data-theme="dark"] { --brand-route: #ffffff; }
+#login h1.brand .brand-mark { width: 30px; height: 30px; }

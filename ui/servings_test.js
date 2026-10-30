@@ -239,7 +239,7 @@ check(SERVINGS_BLOCK.length > 5000 && !/Storage|document\.cookie/.test(SERVINGS_
   "nothing on the Servings screen writes to browser storage, so the key cannot outlive the page");
 check(/else if \(head === "servings"\) \{ show\("servings"\); drawServings\(arg \|\| ""\); \}/.test(SRC),
   "#/servings and #/servings/<name> both reach drawServings");
-check(HTML.includes('<button data-view="servings">Servings</button>') &&
+check(/<button data-view="servings">(<i data-lucide="[a-z0-9-]+"><\/i>)?Servings<\/button>/.test(HTML) &&
       HTML.includes('<section id="view-servings" hidden>'),
   "the nav has a Servings button and the screen exists, so show() finds it");
 
