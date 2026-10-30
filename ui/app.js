@@ -354,23 +354,21 @@ function drawHome() {
     const doneToday = jobs.filter((j) => j.phase === "Succeeded" && isToday(j)).length;
     const failToday = jobs.filter((j) => j.phase === "Failed" && isToday(j)).length;
 
-    // caller_cost_usd is computed on the server (the screen decides nothing):
-    // the caller's own member row and nothing else. It used to fold in the
-    // ownerless bucket for an operator, which made "My spend" read the whole
-    // team total — see StatsResponse.caller_cost_usd.
-    $("home-cards").innerHTML = [
-      card("Active", running.length, running.length ? "run" : ""),
-      card("Finished today", doneToday, doneToday ? "ok" : ""),
-      card("Failed today", failToday, failToday ? "bad" : ""),
-      spendCard(stats),
-    ].join("");
+    // Today's jobs as one card of three counts, each marked the way a status badge is.
+    const tally = (label, n, cls) =>
+      `<div class="tally"><span class="label"><i class="dot ${cls}"></i>${esc(label)}</span>` +
+      `<span class="value${n ? "" : " zero"}">${n}</span></div>`;
+    $("home-cards").innerHTML =
+      `<div class="card tallies">${tally("Active", running.length, "run")}` +
+      `${tally("Finished today", doneToday, "ok")}${tally("Failed today", failToday, "bad")}</div>` +
+      spendCard(stats);
 
     // Running now: the first running job, what it runs on, and the tail of its log.
     const live = running.find((j) => j.phase === "Running") || running[0];
     if (live) {
       const key = live.job_id || live.name;
       const chips = [
-        ["cpu", gpuText(live, false)], ["cloud", live.vendor], ["server", instanceText(live)],
+        ["cpu", gpuText(live, false)], ["server", instanceText(live)],
         ["timer", span(live.started_at, null)],
       ].filter(([, t]) => t);
       $("home-running").innerHTML =
@@ -379,7 +377,8 @@ function drawHome() {
         `<span class="spacer"></span>` +
         (live.cost_usd == null ? "" : `<span class="ov-cost"><small>so far</small>$${Number(live.cost_usd).toFixed(2)}</span>`) +
         `</div>` +
-        `<div class="ov-tags">${chips.map(([i, t]) => `<span class="ov-tag"><i data-lucide="${i}"></i>${esc(t)}</span>`).join("")}</div>` +
+        `<div class="ov-tags">${live.vendor ? `<span class="ov-tag">${vendorLabel(live.vendor)}</span>` : ""}` +
+        `${chips.map(([i, t]) => `<span class="ov-tag"><i data-lucide="${i}"></i>${esc(t)}</span>`).join("")}</div>` +
         `<div class="ov-result"><span class="k">Result</span><span class="mono">${esc(live.result_path || "-")}</span></div>` +
         `</div>` +
         `<div class="ov-gpu" id="ov-gpu" hidden></div>` +
@@ -414,8 +413,13 @@ function drawHome() {
   });
 }
 
-/* Vendor slots in a fixed order, so a vendor keeps its colour whatever else is on screen. */
+/* Vendors in a fixed order, each in its own brand colour and with its mark, so a vendor looks
+   the same wherever it appears. */
 const VENDOR_SLOT = { aws: 1, shadeform: 2, runpod: 3, gcp: 4 };
+const VENDOR_LOGO = { aws: "vendors/aws.png", runpod: "vendors/runpod.png", shadeform: "vendors/shadeform.svg" };
+const vendorLabel = (v) => VENDOR_LOGO[v]
+  ? `<span class="vname"><img class="vlogo" src="${VENDOR_LOGO[v]}" alt="">${esc(v)}</span>`
+  : esc(v);
 
 /* Team spend with what each vendor's share of it was, as one stacked bar. */
 function spendCard(stats) {
@@ -423,9 +427,9 @@ function spendCard(stats) {
   const vendors = (stats.vendors || []).filter((v) => v.cost_usd > 0)
     .sort((a, b) => (VENDOR_SLOT[a.vendor] || 9) - (VENDOR_SLOT[b.vendor] || 9));
   const total = vendors.reduce((n, v) => n + v.cost_usd, 0) || 1;
-  const seg = (v) => `<i class="s${VENDOR_SLOT[v.vendor] || 5}" style="flex:${v.cost_usd / total}" ` +
+  const seg = (v) => `<i class="v-${esc(v.vendor)}" style="flex:${v.cost_usd / total}" ` +
     `title="${esc(v.vendor)} $${v.cost_usd.toFixed(2)}"></i>`;
-  const key = (v) => `<span><i class="s${VENDOR_SLOT[v.vendor] || 5}"></i>${esc(v.vendor)} ` +
+  const key = (v) => `<span>${vendorLabel(v.vendor)} ` +
     `<b class="num">$${v.cost_usd.toFixed(2)}</b></span>`;
   return `<div class="card spend"><div class="spend-top"><span class="label">Team spend</span></div>` +
     `<div class="spend-row"><span class="value">$${stats.cost_usd.toFixed(2)}</span>` +
@@ -592,7 +596,7 @@ function jobsTable(jobs, columns) {
     instance: (j) => `<span class="num">${esc(instanceText(j) || "-")}</span>`,
     // A CPU job's cell is "-": the column stays, the row has no GPU.
     gpu: (j) => `<span class="num">${esc(gpuText(j, false) || "-")}</span>`,
-    vendor: (j) => esc(j.vendor || "-"),
+    vendor: (j) => (j.vendor ? vendorLabel(j.vendor) : "-"),
     recovery: (j) => j.recovery_count
       ? `<span class="num warn-ink">${j.recovery_count}</span>`
       : `<span class="dim">-</span>`,
@@ -1548,7 +1552,7 @@ function quotesHtml(c) {
     const o = offer(text);
     if (!o) return fact(label, text);
     return `<div class="quote ${cls}"><span class="k">${esc(label)}</span>` +
-      `<span class="vendor">${esc(o.vendor)}</span>` +
+      `<span class="vendor">${vendorLabel(o.vendor)}</span>` +
       `<span class="price">${esc(o.price)}<small>/hr</small></span>` +
       (o.rest && !/^buys 1 machine$/.test(o.rest) ? `<span class="rest">${esc(o.rest)}</span>` : "") + `</div>`;
   };
