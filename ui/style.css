@@ -235,10 +235,10 @@ header {
 }
 
 .brand {
-  font-family: var(--mono);
-  font-weight: 600;
+  font-family: var(--sans);
+  font-weight: 700;
   font-size: 24px;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.035em;
   display: flex; align-items: center; gap: 10px;
 }
 .brand-mark { width: 34px; height: 34px; flex: none; }
@@ -1510,7 +1510,7 @@ nav button svg.lucide { width: 17px; height: 17px; }
 }
 
 /* The wordmark stays "hyperun" in the markup (HYPERUN-BRAND); the top bar sets it as a title. */
-header .brand b { text-transform: capitalize; }
+.brand b { text-transform: capitalize; font-weight: 700; }
 
 /* Hierarchy by weight and size, not capitals: labels are sentence case, numbers are set in the
    text face with tabular figures, and the accent is kept for selection, the primary action and
@@ -1581,3 +1581,9 @@ th { font-size: var(--text-sm); font-weight: 500; }
   #view-home .cards { grid-template-columns: minmax(0, 1fr); }
 }
 .spend-key .vname { display: inline; }
+
+/* The mark: two stems, a job and a cloud, joined by the route Hyperun picks. */
+:root { --brand-route: #7fc0ff; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --brand-route: #ffffff; } }
+:root[data-theme="dark"] { --brand-route: #ffffff; }
+#login h1.brand .brand-mark { width: 30px; height: 30px; }
