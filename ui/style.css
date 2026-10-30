@@ -1527,3 +1527,14 @@ th { font-size: var(--text-sm); font-weight: 500; }
 .quote.win .k { color: var(--primary); font-weight: 600; }
 .card .label svg.lucide, .quote .k svg.lucide, .stat .k svg.lucide { color: var(--fg-muted); }
 .quote.win .k svg.lucide { color: var(--primary); }
+
+/* Status is a coloured dot and the word in body ink: no tinted pill. The word carries the
+   meaning, the dot lets the eye find the running and failed rows. */
+.badge { background: none !important; color: var(--fg) !important; padding: 0; height: auto;
+         gap: 7px; font-size: inherit; font-weight: 500; border-radius: 0; }
+.badge::before { width: 8px; height: 8px; }
+.badge.ok::before   { background: var(--ok); }
+.badge.run::before  { background: var(--run); }
+.badge.bad::before  { background: var(--bad); }
+.badge.wait::before { background: var(--wait); }
+.ov-recent .badge { font-size: inherit; }
