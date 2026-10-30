@@ -587,7 +587,7 @@ What `PUT /v1/secrets/{name}` answers. No value, by construction.
 
 | field | required | description |
 |---|---|---|
-| `created` | yes | True when this was the first value registered in this namespace, false when a name was added to or replaced in the existing set. Says which of 'I added one' and 'I overwrote one' happened. |
+| `created` | yes | True when this name had no value in this namespace before, false when the value it had was replaced. Says which of 'I added one' and 'I overwrote one' happened. |
 | `expires_at` |  | The expiry you sent, echoed so you can see it was stored. |
 | `name` | yes | The name you can now put in `secrets`. |
 | `namespace` | yes | Where it was stored. Only jobs in this namespace can use it. |

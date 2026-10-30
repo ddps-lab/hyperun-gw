@@ -93,7 +93,8 @@ class Answers:
 def secret(data):
     """A V1Secret-shaped object with base64 data, as read_namespaced_secret returns it."""
     return types.SimpleNamespace(data={k: base64.b64encode(v.encode()).decode()
-                                       for k, v in data.items()})
+                                       for k, v in data.items()},
+                                 metadata=None)
 
 
 def test_create_serving_turns_409_into_conflict_and_404_into_crd_not_installed():
@@ -145,3 +146,29 @@ def test_one_registered_value_is_read_from_the_namespaces_store_and_nothing_else
         Cluster(None, core).user_secret_value("lab-alice", "MISSING")
     with pytest.raises(NotFound):
         Cluster(None, Answers(read_namespaced_secret=404)).user_secret_value("ns", "HF_TOKEN")
+
+
+def test_storing_a_secret_answers_about_the_name_not_the_object():
+    """A new name in a namespace whose Secret already exists is `created`; the same name again is not.
+
+    Until 2026-10-30 the answer said whether the Secret OBJECT had to be created, so every name
+    after a namespace's first was reported to the user as "replaced".
+    """
+    existing = secret({"HF_TOKEN": "hf-x"})
+    core = Answers(read_namespaced_secret=existing, patch_namespaced_secret=existing)
+    assert Cluster(None, core).put_user_secret("lab-alice", "INPUT_URL", "https://a") is True
+    assert [method for method, _ in core.calls] == ["read_namespaced_secret",
+                                                    "patch_namespaced_secret"]
+    assert Cluster(None, core).put_user_secret("lab-alice", "HF_TOKEN", "hf-y") is False
+
+    # The namespace's first name: nothing to read and nothing to patch, so the Secret is created.
+    first = Answers(read_namespaced_secret=404, patch_namespaced_secret=404,
+                    create_namespaced_secret=existing)
+    assert Cluster(None, first).put_user_secret("lab-bob", "HF_TOKEN", "hf-x") is True
+    assert [method for method, _ in first.calls][-1] == "create_namespaced_secret"
+
+    # A refused read stops the call before anything is written.
+    refused = Answers(read_namespaced_secret=403)
+    with pytest.raises(ClusterError):
+        Cluster(None, refused).put_user_secret("lab-alice", "HF_TOKEN", "hf-x")
+    assert [method for method, _ in refused.calls] == ["read_namespaced_secret"]
