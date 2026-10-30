@@ -1538,21 +1538,21 @@ th { font-size: var(--text-sm); font-weight: 500; }
 .badge.wait::before { background: var(--wait); }
 .ov-recent .badge { font-size: inherit; }
 
-/* Today's counts: one card, three columns split by hairlines, the numbers in body ink. */
+/* The job counts: laid out like Team spend, a label over the numbers, each number followed by
+   its word. The numbers are in body ink; only the dots carry status colour. */
 #view-home .cards { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); }
-.card.tallies { display: grid; grid-template-columns: repeat(3, 1fr); padding: var(--sp-4) 0; gap: 0; }
-.tally { display: flex; flex-direction: column; justify-content: space-between; gap: var(--sp-2);
-         padding: 0 var(--sp-5); }
-.tally + .tally { border-left: 1px solid var(--border); }
-.tally .label { display: inline-flex; align-items: center; gap: 7px; }
-.tally .value { font-size: 34px; font-weight: 600; line-height: 1; color: var(--fg) !important; }
-.tally .value.zero { color: var(--fg-muted) !important; font-weight: 500; }
+.card.tallies { gap: 2px; }
+.tally-row { display: flex; align-items: baseline; gap: var(--sp-6); flex-wrap: wrap; }
+.tally { display: inline-flex; align-items: baseline; gap: 10px; }
+#view-home .tally .value { font-size: 34px; font-weight: 600; line-height: 1.15; color: var(--fg) !important; }
+#view-home .tally .value.zero { color: var(--fg-muted) !important; font-weight: 500; }
+.tally-word { display: inline-flex; align-items: center; gap: 7px; color: var(--fg-muted); font-size: 14px; font-weight: 500; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
 .dot.run { background: var(--run); } .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
-#view-home .card.spend .value { font-size: 34px; line-height: 1; }
+#view-home .card.spend .value { font-size: 34px; line-height: 1.15; }
 @media (max-width: 720px) {
-  .tally { padding: 0 var(--sp-3); }
-  .tally .value { font-size: 28px; }
+  .tally-row { gap: var(--sp-4); }
+  #view-home .tally .value { font-size: 28px; }
 }
 
 /* Vendor marks and brand colours. Shadeform's navy lightens in dark mode so its bar stays visible. */

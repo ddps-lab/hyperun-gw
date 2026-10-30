@@ -354,13 +354,15 @@ function drawHome() {
     const doneToday = jobs.filter((j) => j.phase === "Succeeded" && isToday(j)).length;
     const failToday = jobs.filter((j) => j.phase === "Failed" && isToday(j)).length;
 
-    // Today's jobs as one card of three counts, each marked the way a status badge is.
+    // The jobs as one card laid out like Team spend: a label, then each count with its word,
+    // marked the way a status badge is.
     const tally = (label, n, cls) =>
-      `<div class="tally"><span class="label"><i class="dot ${cls}"></i>${esc(label)}</span>` +
-      `<span class="value${n ? "" : " zero"}">${n}</span></div>`;
+      `<span class="tally"><span class="value${n ? "" : " zero"}">${n}</span>` +
+      `<span class="tally-word"><i class="dot ${cls}"></i>${esc(label)}</span></span>`;
     $("home-cards").innerHTML =
-      `<div class="card tallies">${tally("Active", running.length, "run")}` +
-      `${tally("Finished today", doneToday, "ok")}${tally("Failed today", failToday, "bad")}</div>` +
+      `<div class="card tallies"><span class="label">Jobs</span><div class="tally-row">` +
+      `${tally("Active", running.length, "run")}${tally("Finished today", doneToday, "ok")}` +
+      `${tally("Failed today", failToday, "bad")}</div></div>` +
       spendCard(stats);
 
     // Running now: the first running job, what it runs on, and the tail of its log.
@@ -408,7 +410,7 @@ function drawHome() {
     }
 
     // Recent jobs with what each one cost.
-    $("ov-recent").innerHTML = jobsTable(jobs.slice(0, 5), ["name", "status", "gpu", "vendor", "cost"]);
+    $("ov-recent").innerHTML = jobsTable(jobs.slice(0, 6), ["name", "status", "gpu", "vendor", "cost"]);
     wireRows($("ov-recent"));
   });
 }
