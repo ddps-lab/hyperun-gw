@@ -380,7 +380,7 @@ function drawHome() {
         `<span class="spacer"></span>` +
         (live.cost_usd == null ? "" : `<span class="ov-cost"><small><i data-lucide="receipt"></i>so far</small>$${Number(live.cost_usd).toFixed(2)}</span>`) +
         `</div>` +
-        `<div class="chips">${chips.map(([i, t]) => `<span class="chip"><i data-lucide="${i}"></i>${esc(t)}</span>`).join("")}</div>` +
+        `<div class="ov-tags">${chips.map(([i, t]) => `<span class="ov-tag"><i data-lucide="${i}"></i>${esc(t)}</span>`).join("")}</div>` +
         `<div class="ov-result"><span class="k"><i data-lucide="hard-drive-upload"></i>Result</span><span class="mono">${esc(live.result_path || "-")}</span></div>` +
         `</div>` +
         `<div class="ov-gpu" id="ov-gpu" hidden></div>` +
