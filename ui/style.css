@@ -92,7 +92,7 @@
      motion here says "this moved", never anything decorative. */
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
 
-  --sans: "IBM Plex Sans KR", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+  --sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
           "Malgun Gothic", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }

@@ -359,15 +359,14 @@ function drawHome() {
     // ownerless bucket for an operator, which made "My spend" read the whole
     // team total — see StatsResponse.caller_cost_usd.
     $("home-cards").innerHTML = [
-      card("Active", running.length, running.length ? "run" : "", "activity"),
-      card("Finished today", doneToday, doneToday ? "ok" : "", "circle-check"),
-      card("Failed today", failToday, failToday ? "bad" : "", "circle-x"),
+      card("Active", running.length, running.length ? "run" : ""),
+      card("Finished today", doneToday, doneToday ? "ok" : ""),
+      card("Failed today", failToday, failToday ? "bad" : ""),
       spendCard(stats),
     ].join("");
 
     // Running now: the first running job, what it runs on, and the tail of its log.
     const live = running.find((j) => j.phase === "Running") || running[0];
-    $("home-running-note").textContent = running.length > 1 ? `1 of ${running.length} active` : "";
     if (live) {
       const key = live.job_id || live.name;
       const chips = [
@@ -378,13 +377,13 @@ function drawHome() {
         `<div class="ov-job">` +
         `<div class="ov-job-head"><span class="ov-job-name">${esc(live.name)}</span>${badge(live.phase)}` +
         `<span class="spacer"></span>` +
-        (live.cost_usd == null ? "" : `<span class="ov-cost"><small><i data-lucide="receipt"></i>so far</small>$${Number(live.cost_usd).toFixed(2)}</span>`) +
+        (live.cost_usd == null ? "" : `<span class="ov-cost"><small>so far</small>$${Number(live.cost_usd).toFixed(2)}</span>`) +
         `</div>` +
         `<div class="ov-tags">${chips.map(([i, t]) => `<span class="ov-tag"><i data-lucide="${i}"></i>${esc(t)}</span>`).join("")}</div>` +
-        `<div class="ov-result"><span class="k"><i data-lucide="hard-drive-upload"></i>Result</span><span class="mono">${esc(live.result_path || "-")}</span></div>` +
+        `<div class="ov-result"><span class="k">Result</span><span class="mono">${esc(live.result_path || "-")}</span></div>` +
         `</div>` +
         `<div class="ov-gpu" id="ov-gpu" hidden></div>` +
-        `<div class="ov-log-head"><i data-lucide="square-terminal"></i>Live log<span class="live-dot"></span></div>` +
+        `<div class="ov-log-head">Live log<span class="live-dot"></span></div>` +
         `<pre class="log ov-log" id="ov-log">Waiting for output.</pre>`;
       $("home-running").querySelector(".ov-job").onclick = () => go("jobs", key);
       call(`/v1/jobs/${key}/logs?window_seconds=0&max_lines=10000`).then((r) => {
@@ -405,7 +404,7 @@ function drawHome() {
     const quote = jobs.find((j) => j.phase === "Compared");
     $("ov-quote").hidden = !quote;
     if (quote) {
-      $("ov-quote-name").textContent = `${quote.name} · priced only, nothing rented`;
+      $("ov-quote-name").textContent = quote.name;
       $("ov-quote-body").innerHTML = quotesHtml(parseCompare(quote.message));
     }
 
@@ -428,8 +427,7 @@ function spendCard(stats) {
     `title="${esc(v.vendor)} $${v.cost_usd.toFixed(2)}"></i>`;
   const key = (v) => `<span><i class="s${VENDOR_SLOT[v.vendor] || 5}"></i>${esc(v.vendor)} ` +
     `<b class="num">$${v.cost_usd.toFixed(2)}</b></span>`;
-  return `<div class="card spend"><div class="spend-top"><span class="label"><i data-lucide="wallet"></i>Team spend</span>` +
-    `<span class="dim tiny">mine $${(stats.caller_cost_usd || 0).toFixed(2)}</span></div>` +
+  return `<div class="card spend"><div class="spend-top"><span class="label">Team spend</span></div>` +
     `<div class="spend-row"><span class="value">$${stats.cost_usd.toFixed(2)}</span>` +
     `<div class="spend-viz"><div class="stackbar">${vendors.map(seg).join("")}</div>` +
     `<div class="spend-key">${vendors.map(key).join("")}</div></div></div></div>`;
@@ -443,9 +441,8 @@ function gpuArea(series, last) {
     H - Math.max(0, Math.min(100, s.utilization_percent)) / 100 * H]);
   const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
   const grid = [0, 50, 100].map((v) => `<line x1="0" x2="${W}" y1="${H - v}" y2="${H - v}" />`).join("");
-  return `<div class="ov-gpu-head"><span><i data-lucide="gauge"></i>GPU utilisation</span>` +
-    `<span class="ov-gpu-now"><b>${last.utilization_percent}%</b> now · ` +
-    `<i data-lucide="memory-stick"></i>${Math.round(last.memory_percent)}% · <i data-lucide="zap"></i>${Math.round(last.power_w)} W</span></div>` +
+  return `<div class="ov-gpu-head"><span>GPU utilisation</span>` +
+    `<span class="ov-gpu-now"><b>${last.utilization_percent}%</b></span></div>` +
     `<div class="ov-gpu-plot"><div class="ov-gpu-y"><span>100</span><span>50</span><span>0</span></div>` +
     `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
     `<g class="grid">${grid}</g>` +
@@ -460,8 +457,8 @@ const logLine = (l) => esc(l)
   .replace(/^(\d\d:\d\d:\d\d)(\s+)/, '<span class="ts">$1</span>$2')
   .replace(/(\[hyperun\].*)$/, '<span class="sys">$1</span>');
 
-const card = (label, value, cls = "", icon = "") =>
-  `<div class="card"><span class="label">${icon ? `<i data-lucide="${icon}"></i>` : ""}${esc(label)}</span>` +
+const card = (label, value, cls = "") =>
+  `<div class="card"><span class="label">${esc(label)}</span>` +
   `<span class="value ${cls}">${esc(value)}</span></div>`;
 
 /* ------------------------------------------------------------------ 2. Jobs */
@@ -1547,20 +1544,20 @@ function quotesHtml(c) {
     const m = String(text).match(/^(\S+)\s+(\$[\d.]+)\/hr\s*(.*)$/);
     return m ? { vendor: m[1], price: m[2], rest: m[3] } : null;
   };
-  const card = (label, text, cls, icon) => {
+  const card = (label, text, cls) => {
     const o = offer(text);
     if (!o) return fact(label, text);
-    return `<div class="quote ${cls}"><span class="k"><i data-lucide="${icon}"></i>${esc(label)}</span>` +
+    return `<div class="quote ${cls}"><span class="k">${esc(label)}</span>` +
       `<span class="vendor">${esc(o.vendor)}</span>` +
       `<span class="price">${esc(o.price)}<small>/hr</small></span>` +
-      (o.rest ? `<span class="rest">${esc(o.rest)}</span>` : "") + `</div>`;
+      (o.rest && !/^buys 1 machine$/.test(o.rest) ? `<span class="rest">${esc(o.rest)}</span>` : "") + `</div>`;
   };
   return `<div class="quotes">` +
-    (c.winner ? card("Cheapest", c.winner, "win", "trophy") : "") +
-    (c.runnerUp ? card("Runner-up", c.runnerUp, "", "medal") : "") +
+    (c.winner ? card("Cheapest", c.winner, "win") : "") +
+    (c.runnerUp ? card("Runner-up", c.runnerUp, "") : "") +
     `<div class="quote-side">` +
-    (c.margin ? `<div class="stat"><span class="k"><i data-lucide="trending-down"></i>Price gap</span><span class="big ok-ink">${esc(c.margin)}</span></div>` : "") +
-    (c.answered ? `<div class="stat"><span class="k"><i data-lucide="layers"></i>Candidates</span><span class="big">${esc(c.answered.replace(/\s*candidate\(?s?\)?\s*answered/i, ""))}</span><span class="rest">answered</span></div>` : "") +
+    (c.margin ? `<div class="stat"><span class="k">Price gap</span><span class="big ok-ink">${esc(c.margin)}</span></div>` : "") +
+    (c.answered ? `<div class="stat"><span class="k">Candidates</span><span class="big">${esc(c.answered.replace(/\s*candidate\(?s?\)?\s*answered/i, ""))}</span><span class="rest">answered</span></div>` : "") +
     `</div></div>`;
 }
 
