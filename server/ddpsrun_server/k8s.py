@@ -729,13 +729,20 @@ class Cluster:
                 server's own error body, which never contains the request.
 
         Returns:
-            True when the Secret had to be created, False when it already
-            existed and one key was patched into it. The caller says which
-            happened so a user can tell "I added the first one" from "I
-            replaced the one that was there".
+            True when `name` had no value in this namespace before this call,
+            False when this call replaced the value it had. The caller says
+            which happened so a user can tell "I added one" from "I overwrote
+            one".
+
+            ★ ABOUT THE NAME, NOT THE OBJECT. Until 2026-10-30 this answered
+            whether the Secret OBJECT had to be created, which is true only for
+            a namespace's first name. Every later new name was then reported as
+            "replaced", and a user storing a name for the first time was told
+            they had overwritten one -- which sends them looking for whose
+            value they destroyed.
 
         Raises:
-            ClusterError: the API server refused.
+            ClusterError: the API server refused, the read below included.
 
         WHY `stringData` AND A PATCH. `stringData` is the write-only half of a
         Secret: the API server base64-encodes it into `data` and drops it, so
@@ -744,6 +751,9 @@ class Cluster:
         which matters because this server cannot read the Secret's values and
         therefore could not rewrite the whole object even if it wanted to.
         """
+        # The same read `delete_user_secret` makes. The write cannot answer this
+        # itself: a merge patch answers 200 alike for a new key and a replaced one.
+        had_it = name in self.user_secrets(namespace)
         # HYPERUN-SECRET-EXPIRY. The date rides along in the metadata. `None`
         # under a merge patch DELETES the annotation, which is what re-storing a
         # value without a date should mean: a re-minted credential that is now
@@ -756,7 +766,7 @@ class Cluster:
             self._core.patch_namespaced_secret(
                 name=USER_SECRET_NAME, namespace=namespace, body=body
             )
-            return False
+            return not had_it
         except ApiException as exc:
             if exc.status != 404:
                 raise ClusterError(_api_message(exc)) from exc

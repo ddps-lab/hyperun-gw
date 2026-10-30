@@ -72,7 +72,11 @@ class FakeCluster:
     def put_user_secret(self, namespace, name, value, expires_at=None):
         if namespace in self.secrets_forbidden:
             raise k8s.ClusterError("secrets is forbidden: User cannot patch resource")
-        created = namespace not in self.secrets
+        # About the NAME, as the real method answers. This double used to say
+        # `namespace not in self.secrets` -- the same mistake the real method
+        # made, so the two agreed and no test could see a second new name in a
+        # namespace being reported as "replaced".
+        created = name not in self.secrets.get(namespace, {})
         self.secrets.setdefault(namespace, {})[name] = value
         # A put with no date CLEARS any date the name had, exactly as the merge
         # patch does -- a re-minted credential that is now permanent must not
@@ -2086,6 +2090,16 @@ def test_a_registered_name_becomes_usable_and_lands_in_that_namespace(client, cl
                                        "key": "HF_TOKEN"}},
     }
     assert "value" not in entry, "값이 job spec 에 들어가면 etcd 와 모든 백업에 남는다"
+
+
+def test_a_second_new_name_is_created_and_the_same_name_again_is_not(client, cluster):
+    """`created` 는 이름을 두고 답한다. 2026-10-30 까지는 namespace 의 첫 이름에만
+    True 였고, 이미 다른 이름이 있는 namespace 에 처음 넣는 이름도 replaced 로 보였다."""
+    as_alice(client, "PUT", "/v1/secrets/HF_TOKEN", json={"value": "hf_xxx"})
+    second = as_alice(client, "PUT", "/v1/secrets/INPUT_URL", json={"value": "https://a"})
+    assert second.json()["created"] is True, "처음 넣는 이름이다"
+    again = as_alice(client, "PUT", "/v1/secrets/INPUT_URL", json={"value": "https://b"})
+    assert again.json()["created"] is False, "같은 이름의 값을 바꿨다"
 
 
 def test_a_registered_value_never_comes_back(client, cluster):

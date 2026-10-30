@@ -954,9 +954,9 @@ class SecretPutResponse(BaseModel):
         description="Where it was stored. Only jobs in this namespace can use it."
     )
     created: bool = Field(
-        description="True when this was the first value registered in this "
-        "namespace, false when a name was added to or replaced in the existing "
-        "set. Says which of 'I added one' and 'I overwrote one' happened."
+        description="True when this name had no value in this namespace "
+        "before, false when the value it had was replaced. Says which of "
+        "'I added one' and 'I overwrote one' happened."
     )
     expires_at: str | None = Field(
         default=None,
