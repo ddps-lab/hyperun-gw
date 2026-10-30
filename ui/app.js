@@ -445,7 +445,7 @@ function gpuArea(series, last) {
     H - Math.max(0, Math.min(100, s.utilization_percent)) / 100 * H]);
   const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
   const grid = [0, 50, 100].map((v) => `<line x1="0" x2="${W}" y1="${H - v}" y2="${H - v}" />`).join("");
-  return `<div class="ov-gpu-head"><span>GPU utilisation</span>` +
+  return `<div class="ov-gpu-head"><span>GPU utilization</span>` +
     `<span class="ov-gpu-now"><b>${last.utilization_percent}%</b></span></div>` +
     `<div class="ov-gpu-plot"><div class="ov-gpu-y"><span>100</span><span>50</span><span>0</span></div>` +
     `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
