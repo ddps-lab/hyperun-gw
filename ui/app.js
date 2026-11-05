@@ -92,6 +92,10 @@ setInterval(pollDeployedVersion, 600000);
 
 /* ------------------------------------------------------------------ storage */
 
+/* The two keys are the ones they had before the hyperun rename, and they stay:
+   they are live state in people's browsers, and a new key would sign every one
+   of them out (index.html, HYPERUN-BRAND). signOut() removes them with clear(),
+   because its sweep of hyperun.* keys does not reach them (HYPERUN-UI-SIGN-OUT). */
 const store = {
   get server() { return localStorage.getItem("ddpsrun.server") || ""; },
   get token() { return localStorage.getItem("ddpsrun.token") || ""; },
@@ -3617,13 +3621,14 @@ $("stock-alert-list").addEventListener("click", async (event) => {
    key, so a browser that has never touched the control and one that has chosen
    Auto are the same state -- there is no third value to keep in step with the
    <head> boot script. */
+const THEME_KEY = "hyperun.theme";   // the boot script reads it by name; signOut() leaves it
 function currentTheme() {
-  try { return localStorage.getItem("hyperun.theme") || "system"; } catch { return "system"; }
+  try { return localStorage.getItem(THEME_KEY) || "system"; } catch { return "system"; }
 }
 function setTheme(next) {
   try {
-    if (next === "system") localStorage.removeItem("hyperun.theme");
-    else localStorage.setItem("hyperun.theme", next);
+    if (next === "system") localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, next);
   } catch { /* private mode: the choice lasts for this page only. */ }
   // HYPERUN-THEME-FADE. A quarter-second cross-fade instead of a snap (style.css, html.theming).
   // The class comes off again on a timer, because a permanent transition on every element
@@ -4139,9 +4144,24 @@ async function refreshIfExpired() {
 
 /* Sign out for real: this browser forgets us, and so does Cognito.
 
-   REMOVING EVERY hyperun.* KEY, not the three we happen to name. A key left
-   behind starts the next visit half signed in, and the list has grown twice
-   already (refresh token, then the PKCE verifier).
+   THE STORE FIRST (HYPERUN-UI-SIGN-OUT). The API address and the id_token keep
+   the keys they had before the hyperun rename (see `store`), and the sweep
+   below does not match them. From the rename until 2026-11-05 the sweep was
+   all there was, so the id_token outlived Sign out: the page came back from
+   Cognito's /logout, start() found the token, and the app opened again for the
+   rest of its hour. After the hour it was worse. refreshIfExpired() found no
+   refresh token (the sweep had removed it), or one Cognito refused, and called
+   this; the page went to /logout and back, start() met the same expired token,
+   and the round trip repeated on every load until the site's storage was
+   cleared by hand.
+
+   THEN EVERY hyperun.* KEY, not the ones we happen to name. A key left behind
+   starts the next visit half signed in, and the list has grown twice already
+   (refresh token, then the PKCE verifier). The theme is the exception: it signs
+   nobody in, and its toggle sits in the header, which a signed-out person never
+   sees, so removing it repainted the sign-in card in the system colours with no
+   way to change them back. It survived sign-out from the day it was added until
+   the rename brought it under this sweep.
 
    AND ENDING THE COGNITO SESSION, which is the half that was missing until
    2026-09-08. Clearing local storage leaves Cognito's own session cookie
@@ -4152,8 +4172,9 @@ async function refreshIfExpired() {
 function signOut() {
   poll.stop();
   $("newcomer").hidden = true;
+  store.clear();
   Object.keys(localStorage)
-    .filter((k) => k.startsWith("hyperun."))
+    .filter((k) => k.startsWith("hyperun.") && k !== THEME_KEY)
     .forEach((k) => localStorage.removeItem(k));
   sessionStorage.removeItem(LOGIN_KEY);
   // The namespace picker belongs to the person, not the browser: the next
