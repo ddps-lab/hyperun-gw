@@ -201,6 +201,12 @@ jobs:
       - name: Stock 화면
         # HYPERUN-STOCK. 재고 board 의 필터와 그리기, 알림 행, 주소의 필터.
         run: node ui/stock_test.js
+      - name: 로그인 카드가 서버 장애를 token 상자로 가리지 않는지
+        # HYPERUN-UI-LOGIN-DOWN. /v1/login-config 가 200 으로 답하면 enabled 값에 따라 Sign in
+        # 버튼이나 token 상자를 그린다. 답하지 못하면(200 이 아닌 status, 실패한 요청) 둘 다
+        # 숨기고, 서버가 답하지 않았다는 안내와 Try again 버튼을 그린다. 2026-11-05 에 일부러
+        # 재운 gateway 의 503 이 token 상자로 보여서, Google 로그인이 없어진 것처럼 읽혔다.
+        run: node ui/login_card_test.js
 
   references-current:
     name: agent reference 가 코드와 맞는지
