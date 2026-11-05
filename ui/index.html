@@ -130,7 +130,8 @@
   </div>
 
   <!-- Shown when the server reports Cognito is configured. app.js asks
-       GET /v1/login-config at startup and unhides exactly one of these two. -->
+       GET /v1/login-config at startup and unhides exactly one of these two,
+       or, when the server does not answer, the login-down box below. -->
   <div id="cognito-box" class="stack" hidden>
     <button class="go" id="cognito-login">Sign in</button>
     <p class="dim tiny">You will be sent to the sign-in page and brought back here.</p>
@@ -139,7 +140,8 @@
   <!-- The token box is NOT offered when Cognito is on (2026-09-08: sign-in is
        Google-only). It survives in the markup as the sole fallback for a
        deployment that has no user pool at all — app.js unhides it only when
-       /v1/login-config says Cognito is off, where it is the only way in. The
+       /v1/login-config ANSWERS that Cognito is off, where it is the only way
+       in. A server that does not answer gets the login-down box instead. The
        "Use a token instead" toggle that used to sit next to it is gone. -->
   <div id="token-box" class="stack" hidden>
     <!-- Hidden once the page knows the address from config.json. It stays for
@@ -150,6 +152,18 @@
     <label><span>Token</span>
       <input id="in-token" type="password" placeholder="a token from your operator" autocomplete="off"></label>
     <button class="go" id="do-login">Sign in with a token</button>
+  </div>
+
+  <!-- HYPERUN-UI-LOGIN-DOWN. Shown INSTEAD of both boxes above when GET
+       /v1/login-config got no answer: the request failed, or the status was
+       not 200 (on 2026-11-05, the 503 page ingress-nginx serves while the
+       gateway is scaled to zero). The token box is not the fallback here: it
+       is for a server that answered and has no user pool, and a server that
+       does not answer takes no token either. app.js writes the note, which
+       names the address and what came back; Try again runs startup again. -->
+  <div id="login-down" class="stack" hidden>
+    <div id="login-down-note"></div>
+    <button class="go" id="login-retry">Try again</button>
   </div>
 
   <!-- HYPERUN-REGISTER. The screen a first-time Google visitor lands on.

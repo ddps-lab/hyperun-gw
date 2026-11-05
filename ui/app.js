@@ -3892,9 +3892,12 @@ $("d-log-copy").onclick = () => copyText(logText || "", $("d-log-copy"), $("d-lo
  *   to Cognito's own login page, Cognito sends it back with a code, and the page
  *   trades that code for an id_token. Nothing here ever sees a password.
  *
- *   A pasted token, otherwise. That is the whole of what existed before Cognito,
- *   and it stays because a deployment with no user pool is still a supported one
- *   (`docs/16-login.md` 16.3).
+ *   A pasted token, when the server ANSWERS that it has no user pool. That is the
+ *   whole of what existed before Cognito, and it stays because a deployment with
+ *   no user pool is still a supported one (`docs/16-login.md` 16.3).
+ *
+ *   Neither, when the server does not answer at all. The card then says so and
+ *   offers Try again (HYPERUN-UI-LOGIN-DOWN).
  *
  * WHY PKCE. Trading a code for a token normally needs a client secret, and this
  * page is three static files anyone can read — there is nowhere to put one. PKCE
@@ -3939,15 +3942,19 @@ const redirectUri = () => location.origin + location.pathname;
 /* HYPERUN-UI-LOGIN-STAGE. What the login card shows while start() works:
      "checking" — fresh load, we do not yet know how this deployment signs in;
      "signing"  — back from Cognito with a ?code=, the exchange is running;
-     "ready"    — start() finished; show the way in the server offers.
+     "ready"    — start() finished; show the way in the server offers;
+     "down"     — start() finished, but the server did not answer
+                  /v1/login-config, so there is no way in to offer
+                  (HYPERUN-UI-LOGIN-DOWN).
    One function rather than scattered .hidden writes, because the 2026-09-07
    defect was exactly a scattered default: the token box was the page's default
    face while the answer was in flight (about 0.5s warm, ~5s on a cold Lambda),
    and to someone just back from Google it read as a failed sign-in. */
 function setLoginStage(stage) {
-  $("login-wait").hidden = stage === "ready";
+  $("login-wait").hidden = stage === "ready" || stage === "down";
   $("login-wait-text").textContent =
     stage === "signing" ? "Signing you in…" : "Checking sign-in…";
+  $("login-down").hidden = stage !== "down";
   if (stage !== "ready") {
     $("cognito-box").hidden = true;
     $("token-box").hidden = true;
@@ -4259,15 +4266,52 @@ $("nc-ask").onclick = async () => {
 
 window.addEventListener("hashchange", route);
 
+/* HYPERUN-UI-LOGIN-DOWN. Ask the server how it signs people in.
+
+   Returns the server's own answer when there is one: a 200 whose body is the
+   settings, `enabled` true or false. Anything else comes back as
+   `{enabled: false, down: <what came back>}`, and `down` is what start() reads
+   to say the server is not answering instead of drawing a way in.
+
+   WHY THE TWO ARE KEPT APART. Until 2026-11-05 a failure came back as a plain
+   `{enabled: false}`, which is the answer of a deployment with no user pool,
+   and the card offered the token box. That day the gateway was scaled to zero
+   on purpose, ingress-nginx answered this route with its 503 page, and the
+   card showed only "Sign in with a token". It read as Google sign-in having
+   been removed, and a token could not have worked either: the API was down.
+   The 2026-09-16 CORS defect (HYPERUN-CORS) reached the token box the same
+   way.
+
+   A read the browser refuses for CORS rejects exactly like a dead host, so it
+   is reported as "unreachable" too. The browser console names the real cause. */
+async function fetchLoginConfig(base) {
+  let response;
+  try {
+    response = await fetch(base + "/v1/login-config");
+  } catch {
+    return { enabled: false, down: "unreachable" };
+  }
+  if (!response.ok) return { enabled: false, down: `status ${response.status}` };
+  const config = await response.json().catch(() => null);
+  return config && typeof config.enabled === "boolean"
+    ? config
+    : { enabled: false, down: `status ${response.status}, not its sign-in settings` };
+}
+
 /* Startup, in this order:
      1. ask the server whether Cognito is on, so the right box is drawn;
      2. if we came back from Cognito, finish that before anything else;
-     3. show the app when we now hold a credential. */
-(async function start() {
+     3. show the app when we now hold a credential.
+   Runs on load, and again from the Try again button when the server did not
+   answer step 1. */
+async function start() {
   // Back from Cognito? Say so before the first network round trip: the person
   // has just signed in with Google, and the worst thing to show them while the
-  // exchange runs is a token box that reads as a failed sign-in.
-  if (new URLSearchParams(location.search).has("code")) setLoginStage("signing");
+  // exchange runs is a token box that reads as a failed sign-in. On a first
+  // load the card already reads "Checking sign-in…"; setting it here matters
+  // when Try again runs this a second time over the note that the server did
+  // not answer, which it hides.
+  setLoginStage(new URLSearchParams(location.search).has("code") ? "signing" : "checking");
 
   // Where the API lives. The page and the API are on DIFFERENT hosts in the
   // deployed setup — the page is a CloudFront distribution over an S3 bucket,
@@ -4284,15 +4328,6 @@ window.addEventListener("hashchange", route);
   // page's own origin, which is correct for a same-origin deployment (the
   // server running as a pod behind one address).
   apiBase = store.server;
-
-  const fetchLoginConfig = async (base) => {
-    try {
-      const response = await fetch(base + "/v1/login-config");
-      return response.ok ? await response.json() : { enabled: false };
-    } catch {
-      return { enabled: false };
-    }
-  };
 
   // login-config needs apiBase, and config.json may override apiBase — a real
   // dependency, so a first-ever visit stays sequential. But a browser that has
@@ -4319,6 +4354,20 @@ window.addEventListener("hashchange", route);
   loginConfig = early && apiBase === guessedBase
     ? await early
     : await fetchLoginConfig(apiBase);
+
+  // HYPERUN-UI-LOGIN-DOWN. No answer, so no box. The token box is for a
+  // server that answered and has no user pool; a server that did not answer
+  // takes no token either. Stopping HERE also leaves a stored sign-in alone:
+  // the probe below can only fail against a server that is not answering, and
+  // its failure path signs the person out. A ?code= stays in the address
+  // unspent, so Try again finishes that sign-in once the server is back.
+  if (loginConfig.down) {
+    setLoginStage("down");
+    $("login-down-note").innerHTML = note("err",
+      `The server at ${apiBase} did not answer (${loginConfig.down}), so sign-in is unavailable right now.`,
+      "Try again later, or ask an operator whether the service is running.");
+    return;
+  }
 
   // A config that is on but incomplete is worse than one that is off: the
   // button would be live with nothing behind it, which is exactly the failure
@@ -4367,7 +4416,13 @@ window.addEventListener("hashchange", route);
   } else {
     showApp(false);
   }
-})();
+}
+
+// The same startup again rather than a page reload: the card goes back to
+// "Checking sign-in…" while it runs, so a press that meets the same outage is
+// visibly a new attempt and not a button that did nothing.
+$("login-retry").onclick = () => start();
+start();
 
 /* Icons (Lucide). Screens draw `<i data-lucide>` placeholders; this swaps them for SVGs after
    any redraw, so no draw function has to remember to. */
